@@ -10,8 +10,10 @@ This protocol is being designed in the open. See the commit history for how it e
 
 ## Table of Contents
 
+- [The ideas in plain English (start here)](#the-ideas-in-plain-english)
+
 1. [Threat model](#1-threat-model)
-2. [Definitions and notation](#2-definitions-and-notation)
+2. [Canonical model](#2-canonical-model)
 3. [Key hierarchy](#3-key-hierarchy)
 4. [Enrolment (face to encrypted embedding)](#4-enrolment-face-to-encrypted-embedding)
 5. [Embedding storage and the server's view](#5-embedding-storage-and-the-servers-view)
@@ -20,6 +22,24 @@ This protocol is being designed in the open. See the commit history for how it e
 8. [Revocation (key rotation; forward-immediate, forward-only)](#8-revocation-key-rotation-forward-immediate-forward-only)
 9. [Key escrow and recovery](#9-key-escrow-and-recovery)
 10. [Open questions](#10-open-questions)
+
+---
+
+## The ideas in plain English
+
+If you already know public-key cryptography, you can skip straight to section 1 — nothing in this primer is normative.
+
+This is an on-ramp, not a textbook. The rest of the document is precise and assumes these ideas; here we name each one in a sentence or two and point to where it does its work. Nothing here is a requirement — no key sizes, no thresholds. Those live in the body, on purpose, so there is only one place to read them.
+
+- **Plaintext vs ciphertext.** Plaintext is the readable thing; ciphertext is the scrambled version you get after encrypting it, useless to anyone without the key. In myClick the only sensitive plaintext is a face image (briefly, during enrolment) and a decrypted embedding (briefly, during recognition); everything stored or sent is ciphertext. See sections 4 and 5.
+- **Encrypted in transit vs encrypted at rest.** "In transit" (TLS) protects bytes while they travel over the network; "at rest" protects bytes while they sit on disk or in a database. myClick does both, and the threat model in section 1 lists each separately because they defend against different attackers.
+- **Symmetric keys.** A symmetric key is a single secret that both locks and unlocks — encrypt and decrypt with the same key. The vault key and each Click's group key are symmetric keys; see the key hierarchy in section 3.
+- **Public/private keypairs.** A keypair is two matched halves: a public half you can share freely and a private half you keep secret, such that what one half locks only the other half opens. The account's identity key is a keypair; see section 3.
+- **Key wrapping (envelope encryption).** Using one key to encrypt another key, so the locked key can be stored or shipped safely and only the holder of the outer key can free it. This is the single most load-bearing idea in the document — it appears on nearly every page, and the layered hierarchy and the "one embedding, many locks" diagrams in sections 3 and 6.3 are entirely built from it.
+- **The Secure Enclave.** A dedicated hardware vault inside the iPhone. Keys generated there cannot be copied out — software, including myClick itself, can ask the Enclave to use a key but can never read it. The identity private key lives here; see section 3.
+- **Key escrow.** Safely backing up a key with a trusted party so it can be recovered if the device is lost. myClick escrows the vault key with iCloud Keychain rather than asking a parent to safeguard a recovery phrase; see sections 3.2 and 9.
+- **End-to-end encryption and server-blindness.** When only the endpoints (the users' devices) hold the keys, the server in the middle holds only locked boxes it cannot open. For myClick this is structural, not a promise we ask you to take on faith: there is no key on the server that could decrypt a child's biometric, by construction. See section 5 for the precise enumeration of what the server can and cannot see.
+- **Face embeddings are non-reversible.** A face embedding is a number-vector derived from a face; it is not a compressed photo, and you cannot rebuild the original image from it. That is the whole reason it is the only biometric artifact we ever persist. The rest of how matching works is in section 4.
 
 ---
 
@@ -52,24 +72,36 @@ These are the attacks we do not stop. We list them because pretending otherwise 
 
 ---
 
-## 2. Definitions and notation
+## 2. Canonical model
 
-This section grounds the rest of the document. Terms defined here are used precisely throughout.
+This section defines the abstract, storage-agnostic constructs that the cryptography and the Storage Port depend on. It is the shared vocabulary every other section uses precisely, and it is deliberately narrow: a construct belongs here only if the cryptography or the storage interface depends on it. App-domain concepts that the crypto does not touch are defined in the companion data model, not here (see the closing note).
 
-- **Account** — the principal. One human, one account, always. An account owns its holder's biometric (if they chose to enrol) and the biometrics of any dependents (children) they enrolled. Schools register accounts the same way an individual does.
-- **Click** — the universal grouping primitive. A private circle of people who consent to recognise each other's children at specified places. A family is a Click; a class is a Click; a school's marketing-photo group is a Click. Same primitive at four members or four hundred.
-- **Member** — an account's relationship to a Click. A member has three orthogonal attributes:
-  - `is_biometrically_enrolled` — whether this person's own face is in the Click's recognition roster.
-  - `can_capture` — whether this person may take photos under this Click (photographer rights). Granted two-sided: an admin proposes, the member explicitly accepts.
-  - `is_admin` — whether this person has governance rights (invite, remove, configure premises, set the capturer ACL).
-  All three are independent of one another.
-- **Embedding** — a roughly 2048-byte face vector extracted on-device by MobileFaceNet. It is the only biometric artifact ever persisted, and it is always encrypted. An embedding is not reversible into a photograph.
-- **Template set** — the small set of embeddings stored per enrolled person (more than one, to cover pose and expression variation). A detected face is considered a match if it clears the threshold against any template in the set. See section 4.
-- **Premises** — a geographic scope attached to a Click, used to gate where recognition is active. A premises may be **permanent** (a polygon on a map, e.g. school grounds) or **event** (a bounded, time-limited scope for a one-off shoot). A Click may have zero, one, or many.
-- **Capturer ACL** — the set of members with `can_capture = true` for a given Click. It defines whether capture is **symmetric** (every adult member may capture — family, class parent group) or **asymmetric** (admin plus admin-selected staff only — school marketing group).
-- **Account identity key** — an ECC P-256 keypair generated in the Secure Enclave. Authenticates the account, wraps the account's vault key, and unwraps group keys delivered to this member. The private key is non-exportable.
-- **Account vault key** — an AES-256 symmetric key that wraps the content keys protecting the account's own enrolled embeddings (the holder plus their children), giving the owner private access at rest. It is the portable secret recovered on a new device.
-- **Per-Click group key** — an AES-256 symmetric key, one per Click, rotated on every membership change. The embeddings opted into a Click are protected under this key so that all current members can decrypt them for recognition.
+Each construct below gets a precise definition and a one-line plain gloss.
+
+- **Account identity** — the account's public key. An ECC P-256 keypair generated per account and per device in the Secure Enclave; the public half is published to the server, the private half is non-exportable. It authenticates the account, wraps the account's vault key, and unwraps group keys delivered to this member.
+  *In plain terms: who you are, expressed as a key only your device can prove.*
+- **Person (subject)** — the scope a content key belongs to: the holder of a content key and of the embeddings that content key encrypts. A person is a holder's own face or a dependent's, and it is the unit of cryptographic ownership — one person, one content key, one template set.
+  *In plain terms: the face whose templates a single content key locks.*
+- **Embedding** — the ciphertext. A roughly 2048-byte face vector extracted on-device, persisted only in encrypted form. It is the sole biometric artifact ever stored, and it is not reversible into a photograph.
+  *In plain terms: the encrypted number-vector that stands in for a face.*
+- **Content key** — one per person; the symmetric key that encrypts that person's templates. It is the only key applied directly to embedding ciphertext, and it is the small thing that gets wrapped for each audience (see the wraps below).
+  *In plain terms: the key to one person's faces.*
+- **Vault key** — one per account; the symmetric key that gives the owner private access by wrapping the owner's own content keys (the holder plus their dependents). It is the portable secret recovered on a new device, escrowed in iCloud Keychain.
+  *In plain terms: your private master key for your own family's faces.*
+- **Identity key** — the per-account, per-device keypair (the same construct as Account identity, named here for its key role): its public half wraps the vault key and each group key delivered to this member, and its private half — held only in the Secure Enclave — unwraps them. It is the root of the wrapping hierarchy in section 3.
+  *In plain terms: the device-bound keypair that locks and unlocks everything else.*
+- **Click** — a keying scope: the unit that has a group key. Cryptographically, a Click is exactly "a set of members who share one group key generation," nothing more. (Its app meaning — a circle of people who consent to recognise each other's children at premises — lives in the data model.)
+  *In plain terms: the group that shares one key.*
+- **Membership** — canonically, the set of accounts that currently hold a Click's group key. Membership is defined here by key possession, not by any role flag: you are a member, in the cryptographic sense, exactly when the current group-key version has been wrapped for your identity key.
+  *In plain terms: who currently holds the group's key.*
+- **Group key and GroupKeyVersion** — the symmetric key shared by a Click's members, and one generation of it. There is one group key per Click; it rotates on every membership change, and each rotation mints a new GroupKeyVersion that supersedes and kills the prior one. Rotation is the engine of revocation (section 8); the version stamp also serialises concurrent rotations (section 6.5).
+  *In plain terms: the shared key, and which generation of it you are looking at.*
+- **ContentKeyWrap** — a person's content key encrypted under one outer key: either the owner's vault key (owner-private access) or a specific Click GroupKeyVersion (shared recognition within that Click). The embedding ciphertext is stored once; only this small wrap is multiplied per audience.
+  *In plain terms: one person's content key, locked for one audience.*
+- **GroupKeyWrap** — a GroupKeyVersion encrypted under one member's identity public key, so only that member's Secure Enclave can unwrap it. This is how a group key reaches each member without the server ever holding a usable copy.
+  *In plain terms: the group key, locked so only one member can open it.*
+
+App-domain constructs — guardianship, the opt-in approval flow, premises, licences, and subscriptions — are defined in the companion data model (myClick repo, `docs/data-model.md`), not here, because the cryptography does not depend on them. In the canonical model, "opt-in" appears only as its cryptographic shadow: a person's content key is wrapped under a Click's group key. The body prose elsewhere (sections 1 and 5 through 9) still mentions premises, opt-in, and capture for narrative context; only this canonical model is restricted to crypto-relevant constructs.
 
 ---
 
@@ -84,6 +116,28 @@ The **second layer** is your vault key. This is the key that protects your own f
 The **third layer** is the per-Click group key. Each Click has one. When a child is opted into a Click, that child's embedding is made decryptable by every current member of that Click — so the school photographer's phone can recognise the children whose parents opted them into the school Click, and nobody else's. The group key is how that sharing happens. It is handed to each member by wrapping it under that member's identity public key, so only that member's device can unwrap it. It rotates every time membership changes, which is what makes revocation work (see section 8).
 
 A structural consequence worth stating directly: **a single child's embedding is stored once, but made decryptable by more than one audience.** The embedding ciphertext exists exactly once, encrypted under its own per-person content key (see [section 6.3](#63-content-key-indirection)). What is multiplied is not the embedding but that small content key: it is wrapped once under the parent's vault key — the parent's own private access — and once under each Click's group key the child has been opted into. The same vector, encrypted a single time, with its content key sealed under different locks for different audiences.
+
+The three layers wrap downward: the identity key (its private half locked in the Secure Enclave) wraps the vault key, and the vault key and each group key in turn wrap the content keys that protect the embeddings.
+
+```mermaid
+flowchart TB
+    idk["Identity key (keypair)<br/>private half in the Secure Enclave,<br/>non-exportable"]
+    vault["Vault key (symmetric)<br/>one per account · escrowed in iCloud Keychain"]
+    gk["Group key (symmetric)<br/>one per Click · versioned, rotates on membership change"]
+    ck["Content keys (symmetric)<br/>one per person"]
+    emb["Embedding ciphertext<br/>the only persisted biometric"]
+
+    idk ==>|wraps| vault
+    idk ==>|wraps for delivery| gk
+    vault ==>|wraps| ck
+    gk ==>|wraps| ck
+    ck ==>|encrypts| emb
+
+    classDef key fill:#eef,stroke:#88a,color:#000;
+    classDef plain fill:#fff,stroke:#bbb,color:#000;
+    class idk,vault,gk,ck key;
+    class emb plain;
+```
 
 ### 3.1 The three layers, precisely
 
@@ -188,6 +242,32 @@ This section is the precise enumeration of what the server can and cannot see. I
 
 The discipline is simple: everything the server holds is either ciphertext (useless without keys the server does not have) or metadata we have already conceded ([section 1.2](#12-what-we-concede-accepted-risks-stated-plainly)). Nothing else.
 
+At a glance, the line the server cannot cross: it holds ciphertext and the conceded metadata, and it never holds a plaintext embedding or any usable key.
+
+```mermaid
+flowchart LR
+    subgraph sees["What the server holds"]
+        direction TB
+        ct["Encrypted embeddings (ciphertext)"]
+        wraps["Wrapped content-keys and group keys"]
+        pub["Account public keys"]
+        meta["Membership metadata, timestamps, premises polygons, audit log"]
+    end
+    subgraph never["What the server never holds"]
+        direction TB
+        plain["Plaintext embeddings"]
+        vk["The vault key (escrowed with Apple)"]
+        ugk["Any group key in unwrapped, usable form"]
+        raw["Any raw photo or face image"]
+    end
+    sees -.->|cannot cross| never
+
+    classDef has fill:#efe,stroke:#8a8,color:#000;
+    classDef hasnt fill:#fee,stroke:#a88,color:#000;
+    class ct,wraps,pub,meta has;
+    class plain,vk,ugk,raw hasnt;
+```
+
 ### 5.1 What the server holds
 
 All of this is either ciphertext the server cannot decrypt, or metadata we have openly conceded.
@@ -244,6 +324,34 @@ This deliberately rides on the admin-approval step that already exists in the jo
 ### 6.3 Content-key indirection
 
 Embeddings are not encrypted directly under the group key. Instead, **each person has a single content-key that encrypts their template set, and that content-key is wrapped under the group key.** One extra layer of indirection. The indirection is uniform across audiences: the same content-key is also wrapped under the owner's vault key for the owner's private access (see [section 3](#3-key-hierarchy)). So the embedding ciphertext is stored exactly once, and only the small content-key is wrapped per audience — never the embedding itself.
+
+One embedding, many locks: the embedding is encrypted a single time under its content key, and that one content key is wrapped under the owner's vault key and under each Click group key the person is opted into; each group key is in turn wrapped under every current member's identity public key.
+
+```mermaid
+flowchart TB
+    emb["Embedding ciphertext<br/>encrypted once"]
+    ck["Content key<br/>one per person"]
+    vault["Owner vault key"]
+    gkA["Group key — Click A<br/>(version)"]
+    gkB["Group key — Click B<br/>(version)"]
+    m1["Member 1 identity public key"]
+    m2["Member 2 identity public key"]
+    m3["Member 3 identity public key"]
+
+    ck ==>|encrypts| emb
+    vault ==>|wraps| ck
+    gkA ==>|wraps| ck
+    gkB ==>|wraps| ck
+    m1 ==>|wraps| gkA
+    m2 ==>|wraps| gkA
+    m2 ==>|wraps| gkB
+    m3 ==>|wraps| gkB
+
+    classDef plain fill:#fff,stroke:#bbb,color:#000;
+    classDef key fill:#eef,stroke:#88a,color:#000;
+    class emb plain;
+    class ck,vault,gkA,gkB,m1,m2,m3 key;
+```
 
 The payoff is rotation cost. When membership changes and the group key must rotate ([section 6.4](#64-rotation-on-every-membership-change)), the only things that need re-wrapping are the content-keys — which are a handful of bytes each — not the embeddings themselves, which are kilobytes each. Rotating an 800-child school Click means re-wrapping 800 tiny content-keys, not re-encrypting 800 full embeddings. Same security, roughly a hundredfold less work. The indirection costs one cheap content-key unwrap per person at read time and buys cheap rotation, which is the operation that actually happens often.
 
@@ -337,6 +445,32 @@ Revocation is what happens when someone leaves a Click or is removed from it. Th
 ### 8.1 The mechanism is key rotation
 
 On any membership change — a member removed, or a member leaving — the group key is rotated exactly as described in [section 6.4](#64-rotation-on-every-membership-change): a new group key is generated, wrapped for each remaining member under their identity public key, and the content-keys are re-wrapped under the new key. The departed member never receives the new key, so everything uploaded after the rotation is sealed against them.
+
+Before rotation, the removed member holds version N and can decrypt everything sealed under it. After rotation, the roster is sealed under version N+1, which is wrapped only for the remaining members; the removed member holds a dead key and can decrypt nothing uploaded thereafter.
+
+```mermaid
+flowchart TB
+    subgraph before["Before rotation — group key version N"]
+        direction TB
+        rem1["Removed member<br/>holds version N"]
+        old["Embeddings sealed under version N"]
+        rem1 ==>|can decrypt| old
+    end
+    subgraph after["After rotation — group key version N+1"]
+        direction TB
+        stay["Remaining members<br/>hold version N+1"]
+        rem2["Removed member<br/>still holds only version N (dead)"]
+        new["Embeddings uploaded after rotation,<br/>sealed under version N+1"]
+        stay ==>|can decrypt| new
+        rem2 -.->|cannot decrypt| new
+    end
+    before --> after
+
+    classDef ok fill:#efe,stroke:#8a8,color:#000;
+    classDef no fill:#fee,stroke:#a88,color:#000;
+    class stay,old ok;
+    class rem1,rem2 no;
+```
 
 ### 8.2 Forward-immediate
 
