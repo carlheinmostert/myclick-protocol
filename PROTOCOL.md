@@ -78,8 +78,8 @@ This section defines the abstract, storage-agnostic constructs that the cryptogr
 
 Each construct below gets a precise definition and a one-line plain gloss.
 
-- **Account identity** — the account's public key. An ECC P-256 keypair generated per account and per device in the Secure Enclave; the public half is published to the server, the private half is non-exportable. It authenticates the account, wraps the account's vault key, and unwraps group keys delivered to this member.
-  *In plain terms: who you are, expressed as a key only your device can prove.*
+- **Account identity key** — the account's keypair: an ECC P-256 keypair generated per account and per device in the Secure Enclave. The public half is published to the server; the private half is non-exportable and never leaves the Enclave. It does two jobs — it authenticates the account, and it is the root of the wrapping hierarchy (section 3): its public half wraps this member's vault key and each group key delivered to them, and its private half unwraps them.
+  *In plain terms: the device-bound keypair that proves who you are and unlocks everything else.*
 - **Person (subject)** — the scope a content key belongs to: the holder of a content key and of the embeddings that content key encrypts. A person is a holder's own face or a dependent's, and it is the unit of cryptographic ownership — one person, one content key, one template set.
   *In plain terms: the face whose templates a single content key locks.*
 - **Embedding** — the ciphertext. A roughly 2048-byte face vector extracted on-device, persisted only in encrypted form. It is the sole biometric artifact ever stored, and it is not reversible into a photograph.
@@ -88,8 +88,6 @@ Each construct below gets a precise definition and a one-line plain gloss.
   *In plain terms: the key to one person's faces.*
 - **Vault key** — one per account; the symmetric key that gives the owner private access by wrapping the owner's own content keys (the holder plus their dependents). It is the portable secret recovered on a new device, escrowed in iCloud Keychain.
   *In plain terms: your private master key for your own family's faces.*
-- **Identity key** — the per-account, per-device keypair (the same construct as Account identity, named here for its key role): its public half wraps the vault key and each group key delivered to this member, and its private half — held only in the Secure Enclave — unwraps them. It is the root of the wrapping hierarchy in section 3.
-  *In plain terms: the device-bound keypair that locks and unlocks everything else.*
 - **Click** — a keying scope: the unit that has a group key. Cryptographically, a Click is exactly "a set of members who share one group key generation," nothing more. (Its app meaning — a circle of people who consent to recognise each other's children at premises — lives in the data model.)
   *In plain terms: the group that shares one key.*
 - **Membership** — canonically, the set of accounts that currently hold a Click's group key. Membership is defined here by key possession, not by any role flag: you are a member, in the cryptographic sense, exactly when the current group-key version has been wrapped for your identity key.
