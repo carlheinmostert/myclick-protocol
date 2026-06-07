@@ -156,22 +156,25 @@ flowchart TB
 
 ## 4. Enrolment (face to encrypted embedding)
 
-Enrolment is how a face becomes an encrypted embedding. It is the one moment where myClick handles a raw image of a child, so it is designed with the most care: the raw frames exist in memory only, for as long as it takes to extract embeddings, and are then zeroed.
+Enrolment is how a face becomes an encrypted embedding. It is the one moment where myClick handles a raw image of a child, so it is designed with the most care: the raw frames, and the small set of face crops kept from them, exist in memory only — for the brief enrolment-and-review session, never longer — and are then zeroed. Enrolment reads frames directly from the live camera feed, so it uses the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path ([section 8.3](#83-flow-b--os-owned-capture-disk-backed)) never applies, because iOS never hands enrolment a finished file.
 
 ### 4.1 The flow
 
 1. **Initiate.** A parent starts enrolment, for themselves or for a child. (Enrolling a dependent is the common case.)
-2. **Guided sweep.** The app guides a short multi-angle capture — turn left, turn right, look up, look down, smile. The frames are held in a memory buffer only. They are never written to disk.
-3. **Quality gates.** As frames arrive, the app checks them:
-   - A face must be detected.
-   - Exactly one face must be present. Multiple faces is a **hard block** — enrolment will not proceed, because we must not accidentally enrol the wrong child.
-   - Lighting must be adequate. Poor lighting is a **soft warning** — the app nudges the user but does not stop them.
-   - Pose must vary across the sweep, so the template set actually covers a range of angles.
-4. **Extraction.** MobileFaceNet runs on-device and extracts the embeddings from the captured frames. No image leaves the phone for this step; there is no cloud call.
-5. **Zeroing.** The raw frames are zeroed from the memory buffer immediately, the moment extraction is done. See section 4.6.
-6. **Encryption.** The embeddings are encrypted under the person's content key; that content key is wrapped under the account's vault key (and, once the person is opted into a Click, under that Click's group key — see [section 6.3](#63-content-key-indirection)).
-7. **Storage.** The ciphertext is stored locally and synced to the server. The server receives ciphertext only — it never sees a frame, never sees a plaintext embedding.
-8. **Consent read-back.** A consent read-back is recorded in the audit log: who enrolled whom, when, and under what consent statement.
+2. **Continuous sweep.** The app watches the live feed and harvests a short multi-angle set — front, three-quarter left, three-quarter right, up, down, and a smiling front — filling six angle slots as the subject moves, rather than marching through one fixed pose at a time. Frames stream through memory; only the best crop for each slot is kept, and only in memory. Nothing is ever written to disk.
+3. **Quality gates.** Each candidate frame is gated before it can fill a slot:
+   - A single face must be present. A frame with no face, or with more than one, is skipped — a slot cannot be filled while a second face is present, because we must never harvest the wrong child.
+   - The face must be large enough in the frame for a faithful crop.
+   - The crop must be sharp — a variance-of-Laplacian focus check — so motion-blurred frames are dropped, not captured.
+   - Lighting adequacy is a soft nudge, not a block.
+   - Pose must vary across the six slots so the template set covers a real range of angles.
+   A frame that fails any gate is silently skipped; the app never captures a poor frame just to make progress.
+4. **Review.** When all six slots are filled, the user reviews the captured set and can redo any single slot, in which case the app re-harvests only that one look. The six crops remain in memory throughout; nothing is persisted until the user confirms.
+5. **Extraction.** On confirm, MobileFaceNet runs on-device and extracts the six embeddings from the held crops. No image leaves the phone for this step; there is no cloud call.
+6. **Zeroing.** The held crops are zeroed from memory the moment extraction is done. If the user abandons enrolment before confirming — cancel, back, or the app backgrounding — the crops are zeroed with no extraction at all. See section 4.6.
+7. **Encryption.** The embeddings are encrypted under the person's content key; that content key is wrapped under the account's vault key (and, once the person is opted into a Click, under that Click's group key — see [section 6.3](#63-content-key-indirection)).
+8. **Storage.** The ciphertext is stored locally and synced to the server. The server receives ciphertext only — it never sees a frame, never sees a plaintext embedding.
+9. **Consent read-back.** A consent read-back is recorded in the audit log: who enrolled whom, when, and under what consent statement.
 
 ### 4.2 Liveness: light, not hard-gated
 
@@ -229,7 +232,7 @@ We deliberately do **not** silently update templates as recognition succeeds in 
 
 ### 4.6 The zeroing guarantee
 
-The raw enrolment frames are zeroed from the memory buffer **explicitly in code**, immediately after embeddings are extracted (step 5 above). This is documented here and visible in the open-source code: a reviewer can read the source and confirm that the frames are zeroed and that there is no disk write of the raw image.
+The enrolment face crops are zeroed from memory **explicitly in code**. They are held only in memory, and only for the duration of the enrolment-and-review session — at most the six crops needed for the template set — and are zeroed the moment embedding extraction completes at confirm, or immediately if the user abandons enrolment before confirming (cancel, back, or app backgrounding), in which case no embedding is extracted at all. At no point is a frame or crop written to disk. This is the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path never applies to enrolment. It is documented here and visible in the open-source code: a reviewer can read the source and confirm that the crops are zeroed and that there is no disk write of the raw image.
 
 We state the limit of that plainly. Source-level review proves the source does the right thing. **Binary-level verification — that the app actually shipped to the App Store does exactly this — awaits reproducible builds**, which we do not yet have. We will not imply more assurance than we can currently deliver. The source is auditable today; bit-for-bit verification of the shipped binary is future work.
 
