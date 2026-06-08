@@ -401,7 +401,7 @@ A stranger's embedding is computed in memory, used only for the single obscure-o
 
 The active roster is stored as ciphertext (that is the whole point of [sections 5](#5-embedding-storage-and-the-servers-view) and [6](#6-per-click-group-key-the-ratchet)). Recognition needs it in plaintext. So the roster is decrypted into memory at the start of a session, held for the session, and zeroed at the end.
 
-No plaintext roster is ever written to disk. Only the **encrypted** roster is cached on disk for fast loading; decryption is always in-memory and per-session. This is what keeps the encrypted-at-rest guarantee true for consented children, not only for strangers — your own child's embedding is no more exposed at rest than anyone else's.
+No plaintext roster is ever written to disk. Only the **encrypted** roster is cached on disk for fast loading; decryption is always in-memory and per-session. This is what keeps the encrypted-at-rest guarantee true for consented children, not only for strangers — your own child's embedding is no more exposed at rest than anyone else's. The at-rest representation of that on-disk cache — how it is encrypted, written, read, and shredded — is specified in [section 7.9](#79-on-device-at-rest-roster-cache-r4).
 
 ### 7.4 What an active recognition session is
 
@@ -439,6 +439,64 @@ Matching is brute-force vectorised cosine similarity: one face's embedding is co
 ### 7.8 Mode B
 
 Mode B uses the same recognition engine described above, with one difference: the roster is the **explicitly-selected Click's** roster rather than the capture-by-union of active Clicks. The user chooses the Click context at import time (because imported photos were not taken under any photographer's identity in myClick), and from there detection, extraction, comparison, decision, and zeroing are identical.
+
+### 7.9 On-device at-rest roster cache (R4)
+
+[Section 7.3](#73-roster-decryption-lifecycle-r1) states the invariant — *only the **encrypted** roster is cached on disk; decryption is always in-memory and per-session* — but it does not say how that encrypted cache is built. This section specifies the at-rest representation of the local roster cache, so that the on-device file holding a Click's embeddings is as honest about the encrypted-at-rest guarantee as the server's view in [section 5](#5-embedding-storage-and-the-servers-view) is.
+
+The need is concrete. A device keeps a local cache of each Click's roster so recognition can start instantly without a round-trip to the server (this is what [section 7.6](#76-progressive-roster-loading) loads and what [section 7.3](#73-roster-decryption-lifecycle-r1) decrypts). That cache is the on-device counterpart of the server's encrypted store, and it must hold the same thing the server holds — ciphertext and nothing else.
+
+The invariant, stated once and precisely:
+
+> **No plaintext embedding ever touches disk. The on-device roster cache holds only ciphertext, encrypted under the same key hierarchy as the server's copy.**
+
+#### 7.9.1 The representation: ciphertext, same hierarchy, no new key
+
+The local roster cache stores exactly what [section 5.1](#51-what-the-server-holds) enumerates for the server: encrypted embeddings, plus the wrapped content-keys and wrapped group-keys needed to open them. It is the same `bytea`-shaped ciphertext ([section 5.5](#55-two-decisions-recorded-here)), written to a file in myClick's app container rather than a Postgres row. There is **no new key and no new scheme.** The cache is decryptable on-device exactly because the device already holds the unwrapping keys the recognition path uses ([section 7.3](#73-roster-decryption-lifecycle-r1)):
+
+- the account's **identity key** in the Secure Enclave ([section 3](#3-key-hierarchy)), which unwraps
+- the account **vault key** (for the owner's own people) and each **Click group key** delivered to this member (for opted-in children), which in turn unwrap
+- each person's **content-key**, which decrypts the embedding ciphertext.
+
+This is the load-bearing decision, and it is deliberately conservative: **the at-rest cache introduces no cryptography that is not already in the protocol.** It reuses the §3 hierarchy wholesale. A reviewer who has accepted [sections 3](#3-key-hierarchy), [5](#5-embedding-storage-and-the-servers-view), and [6](#6-per-click-group-key-the-ratchet) has nothing new to accept here — only the assertion that the on-disk cache is built from those same wraps and never from plaintext.
+
+A consequence worth stating directly, because it is the whole point of this section: **a parent's own child's embedding is no more exposed at rest on the device than a stranger's would be — both are ciphertext.** The encrypted-at-rest guarantee is uniform across the family Click and every shared Click. This is the device-side completion of the promise [section 7.3](#73-roster-decryption-lifecycle-r1) makes.
+
+#### 7.9.2 Encrypt-on-write, decrypt-on-read
+
+The cache is written and read at the cache boundary, never the recognition boundary:
+
+- **On write** — when a roster is first synced, or refreshed after a membership change or a new enrolment — the embeddings and their wraps are written to the cache **already in the ciphertext form they arrived in.** Nothing is decrypted in order to cache it. The cache write is a write of ciphertext, full stop; there is no point at which the plaintext roster is serialized to disk.
+- **On read** — at the start of a recognition session ([section 7.4](#74-what-an-active-recognition-session-is)) — the ciphertext cache is loaded and decrypted **into memory**, following the §3 hierarchy, exactly as [section 7.3](#73-roster-decryption-lifecycle-r1) describes. The decrypted roster lives only in memory, for the session, and is zeroed at the session's hard boundaries ([section 7.4](#74-what-an-active-recognition-session-is)) under the same discipline as the enrolment crops ([section 4.6](#46-the-zeroing-guarantee)).
+
+The asymmetry is the point: writing the cache needs no key at all (ciphertext in, ciphertext out), and reading it produces plaintext only in memory and only for a session. There is no operation in the cache's lifecycle that writes a plaintext embedding to disk.
+
+#### 7.9.3 Data Protection class
+
+The cache file is written with **`NSFileProtectionComplete`** and is **excluded from backup** (`isExcludedFromBackup`), the same Data Protection posture the Flow B encrypted scratch uses ([section 8.4](#84-the-hardened-flow-b)). This is defence in depth, not the primary guarantee: the primary guarantee is that the file contents are already ciphertext under the §3 hierarchy (§7.9.1), so even without Data Protection a stolen file yields no embedding. `NSFileProtectionComplete` adds a second, platform-level lock — the file's bytes are additionally encrypted under the device's Data Protection key while the device is locked or powered off — and backup-exclusion keeps the cache off iCloud and out of device backups, consistent with the server-side rule that the at-rest store is not something an attacker can lift from a backup.
+
+Excluding the cache from backup is safe precisely because it is a **cache**, not a source of truth: the authoritative encrypted roster lives on the server ([section 5](#5-embedding-storage-and-the-servers-view)) and is re-synced on a fresh device after recovery ([section 10](#10-key-escrow-and-recovery)). Losing the local cache costs a re-sync, never data.
+
+#### 7.9.4 Fail-closed on key unavailability
+
+If the cache cannot be decrypted — the Secure Enclave identity key is unavailable, the vault key has not yet been recovered on a fresh device, a group key has been rotated out from under a stale cache ([section 6.4](#64-rotation-on-every-membership-change)), or the ciphertext fails its authentication tag — the roster portion that cannot be opened is treated as **empty, not bypassed.** Recognition proceeds with whatever portion did decrypt; any person whose templates could not be decrypted is simply not on the active roster, so faces that would have matched them are **obscured**, not shown. This is the same fail-closed direction as the rest of the pipeline ([section 7.6](#76-progressive-roster-loading)): the safe failure is over-obscuring, never under-obscuring. A cache that cannot be opened never causes a face to be shown that should have been hidden.
+
+A corrupt or undecryptable cache is also **discarded and re-synced** from the server's authoritative ciphertext, since the cache is never the source of truth (§7.9.3).
+
+#### 7.9.5 Crypto-shred on revocation and account close
+
+The cache participates in the same destruction guarantees as the rest of the protocol:
+
+- **On revocation** ([section 9](#9-revocation-key-rotation-forward-immediate-forward-only)). When this member is removed from a Click, the best-effort wipe signal ([section 9.4](#94-best-effort-device-wipe-stated-honestly)) instructs a cooperating client to delete its cached encrypted roster for that Click. Because the cache holds only ciphertext wrapped under the group key the member no longer holds the current version of, the cryptographic guarantee already holds regardless — the stale cache decrypts nothing uploaded after the rotation. The wipe is the same courtesy described in [section 9.4](#94-best-effort-device-wipe-stated-honestly), now made explicit for the on-disk cache: best-effort cleanup, not the guarantee. The guarantee is the key rotation.
+- **On account close** ([section 9.5](#95-account-close)). The local cache is crypto-shredded as part of account teardown.
+
+"Crypto-shred" here means the same thing it means in [section 8.4](#84-the-hardened-flow-b): because the cache is ciphertext, discarding the keys that would open it — or deleting the file and letting the now-dead wraps render any recovered bytes useless — makes the embeddings unrecoverable without dependence on the flash being overwritten.
+
+#### 7.9.6 Open questions for this section
+
+- **Whether the cache file uses its own additional per-file wrapping key, or relies solely on the §3 content-key/group-key/vault-key wraps it already stores.** The Flow B scratch ([section 8.4](#84-the-hardened-flow-b)) adds a dedicated per-file key on top of Data Protection, because its payload is a *cleartext* original that has no other encryption. The roster cache is different: its payload is **already** ciphertext under the §3 hierarchy, so a per-file key would be wrapping ciphertext in more ciphertext — defence in depth, but arguably redundant given §7.9.1. The conservative recommendation is to rely on the §3 wraps plus `NSFileProtectionComplete` and **not** introduce a per-file key, keeping "no new scheme" literally true; an auditor may prefer the extra layer. **This is a question for Carl.**
+- **Whether `NSFileProtectionComplete` is too strict given the lock-screen camera flow.** [Section 7.5](#75-lock-screen-camera-flow) allows the camera from the lock screen, but recognition there needs the roster, and `NSFileProtectionComplete` makes the file unreadable while the device is locked. In practice the camera being active means the device is unlocked (the §7.3 / §7.4 sessions only start once recognition is needed and the app is foregrounded), so `NSFileProtectionComplete` should not conflict — but if a future lock-screen path must read the cache while locked, the class may need to relax to `NSFileProtectionCompleteUntilFirstUserAuthentication` for the cache specifically. The recommendation is to keep `NSFileProtectionComplete` and confirm the lock-screen path never needs the cache while locked. **This is a question for Carl.**
+- **Interaction with #143** (myClick working repo), which also rewrites `RosterStore.save()`. The two changes must be sequenced so the encrypted-write path and whatever #143 changes do not conflict. This is an implementation-sequencing note, not a spec question.
 
 ## 8. Capture and import: source-original lifecycle
 
