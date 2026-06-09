@@ -145,6 +145,9 @@ flowchart TB
 | Account identity key | ECC P-256 keypair | Private key inside the Secure Enclave (non-exportable); public key published to the server | The Secure Enclave itself; never leaves the chip | Authenticates the account; wraps the vault key; unwraps group keys delivered to this member |
 | Account vault key | AES-256 symmetric | On-device, and escrowed in iCloud Keychain | Wrapped by the account identity key; escrowed under iCloud Keychain | Wraps the content keys of the account's own enrolled embeddings (holder + children), giving the owner private access at rest |
 | Per-Click group key | AES-256 symmetric | On-device for each current member; distributed by the server in wrapped form | Wrapped under each member's identity public key for delivery | Makes a Click's opted-in embeddings decryptable by all current members for recognition; rotates on membership change |
+| Device store key | AES-256 symmetric | On-device only (Keychain, device-only / non-synced); never escrowed | Wrapped by the account identity key (Secure Enclave) | Wraps the per-item content keys of the on-device encrypted store — capture scratch, the Light Table pocket, the local gallery (see [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)) |
+
+The first three keys form the **biometric hierarchy**, and "three layers" refers to them. The **device store key** is a fourth key with a different job: it protects on-disk *photo blobs* (source originals and obscured renders), not embeddings. It is introduced where it is used ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)) and sits deliberately outside the escrowed hierarchy above — generated per device, never synced to iCloud Keychain, never escrowed — so the ability to decrypt an unobscured on-disk original never leaves the device that produced it.
 
 ### 3.2 Two decisions locked here
 
@@ -523,7 +526,7 @@ Three mechanisms together make the on-disk original meet the invariant. None is 
 
 **1. Encrypted scratch.** The original is written only to a dedicated scratch location inside myClick's app container, with `NSFileProtectionComplete` and a per-file key. It is never written to a backed-up or shared location, and it is flagged excluded from backup. While the device is locked or powered off, the file's bytes are encrypted and the key is evicted from memory — so a seized, off, or locked phone yields ciphertext, not a child's face. This is the same Data Protection trust anchor the rest of the protocol already relies on; it introduces no new party.
 
-**2. Durable review-set journal.** myClick keeps a persisted journal of every source original that exists on disk and has not yet been obscured-and-destroyed. On every launch, before any other work, the app reconciles this journal to empty: any original left by a previous interrupted run is either finished (obscured, then its original destroyed) or, if the user abandoned it, destroyed outright. Cleanup is idempotent, so an interruption *during* cleanup simply re-runs. This is what converts "a crash leaks the original forever" into "a crash defers cleanup to the next launch, which is guaranteed."
+**2. Durable review-set journal.** myClick keeps a persisted journal of every source original that exists on disk and has not yet been obscured-and-destroyed. On every launch, before any other work, the app reconciles this journal to empty: any original left by a previous interrupted run is either finished (obscured, then its original destroyed) or, if the user abandoned it, destroyed outright. Cleanup is idempotent, so an interruption *during* cleanup simply re-runs. This is what converts "a crash leaks the original forever" into "a crash defers cleanup to the next launch, which is guaranteed." (This journal and its crypto-shred are the **scratch lane** of the general on-device encrypted store defined in [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal); "reconcile to empty on launch" is the scratch lane's retention policy. The persistent Light Table pocket and the time-limited gallery share the same journal and shredding machinery but keep their items rather than emptying them.)
 
 **3. Crypto-shred, not unlink.** Because the scratch file has its own per-file key, destroying it means discarding that key. The bytes become unrecoverable immediately, with no dependence on the flash being overwritten later. "Delete" in this section always means crypto-shred.
 
@@ -541,6 +544,87 @@ A few capture modes cannot be obscured meaningfully even with the machinery abov
 
 - **The invariant is "no recoverable cleartext source original ever persists,"** not "no bytes touch disk." The latter holds for Flow A and is the stronger promise we make wherever it is true; the former is the universal guarantee that also covers Flow B. The corresponding myClick architecture principle is reworded to match (recorded as ADR-0005 in the myClick working repo).
 - **Flow B is gated on the encrypted-scratch + review-set-journal foundation.** No OS-owned capture mode that requires obscuring ships before that foundation exists; until then such modes are either held or restricted to Normal Mode.
+- **The encrypted-scratch foundation is generalised into a single on-device encrypted store** with three retention lanes — scratch, pocket, and stream ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal), [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)). Flow B scratch is its ephemeral lane; the Light Table's persistent review tray and Guardian's local gallery are the other two. Recorded as ADR-0006 in the myClick working repo.
+
+### 8.8 The on-device encrypted store: lanes, keys, and the journal
+
+Three features need to hold an encrypted blob on disk: the Flow B capture scratch above; the **Light Table** review surface, which keeps undecided frames between sessions; and (post-v1.0) the **Guardian** local gallery, which holds received obscured photos until they are saved or expire. These are one mechanism — an encrypted blob on disk, a per-item key, crypto-shred to destroy — differing only in how long an item is allowed to live. myClick therefore implements a single **on-device encrypted store**, and every item carries one **retention lane**.
+
+| Lane | Holds | Retention rule | Used by |
+|------|-------|----------------|---------|
+| **scratch** | an unobscured source original | destroyed the moment it is obscured; the lane is reconciled to empty on every launch | Flow B capture ([section 8.4](#84-the-hardened-flow-b)) |
+| **pocket** | an unobscured original, plus a cached obscured render | kept until the user decides — keep, discard, or switch-off | the Light Table ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)) |
+| **stream** | an obscured photo received from a Click | kept until a per-item time-to-live expires, then crypto-shredded | Guardian's local gallery (its server relay is specified separately) |
+
+```mermaid
+flowchart TB
+    SE["Account identity key<br/>(Secure Enclave, non-exportable)"]
+    SK["Device store key (AES-256)<br/>Keychain · device-only · never escrowed"]
+    CK["Per-item content keys (AES-256)"]
+    subgraph store["On-device encrypted store · NSFileProtectionComplete · excluded from backup"]
+      direction LR
+      L1["scratch<br/>empty on launch"]
+      L2["pocket<br/>keep until decided"]
+      L3["stream<br/>keep until TTL"]
+    end
+    SE ==>|wraps| SK
+    SK ==>|wraps| CK
+    CK ==>|encrypts the blobs in| store
+
+    classDef key fill:#eef,stroke:#88a,color:#000;
+    classDef disk fill:#fee,stroke:#a88,color:#000;
+    class SE,SK,CK key;
+    class L1,L2,L3 disk;
+```
+
+**Keys.** Each item is sealed with its own per-item content key (AES-256), exactly as embeddings are ([section 6.3](#63-content-key-indirection)). Those content keys are wrapped by a single **device store key** — an AES-256 key generated on the device and wrapped under the account identity key in the Secure Enclave ([section 3](#3-key-hierarchy)). The wrapped store key is held in the Keychain as **device-only and non-synced; it is never escrowed to iCloud Keychain and is not part of account recovery.** It is the device-local counterpart of the vault key: where the vault key is escrowed so a parent can recover their family's faces on a new phone, the store key is deliberately *not*, so the ability to decrypt an unobscured on-disk original never leaves the device that produced it. A replaced phone generates a fresh store key and therefore starts with an **empty store** — escrowed biometric data returns through normal recovery; on-disk originals do not.
+
+**At rest.** Every blob is written `NSFileProtectionComplete`, inside myClick's app container, and excluded from backup; and it is never handed to a system service that may cache it ([section 8.4](#84-the-hardened-flow-b)'s procedural rule applies to all lanes). While the device is locked or powered off, the file's bytes and the store key are both unavailable, so a seized, off, or locked phone yields ciphertext.
+
+**Destruction is crypto-shred.** Because every item has its own content key, destroying an item means discarding that key; the bytes become unrecoverable immediately, with no dependence on the flash being overwritten. This holds for all three lanes — an obscured-and-finished scratch original, a discarded Light Table frame, and an expired gallery photo are shredded the same way.
+
+**The journal generalises.** The durable review-set journal of [section 8.4](#84-the-hardened-flow-b) becomes the store's journal: it records every item, its lane, and its state. On every launch, before other work, the app reconciles it — **per lane**: the scratch lane is emptied (any leftover original is finished or destroyed, idempotently, exactly as before); overdue stream items are expired; and pocket items are verified present and consistent and otherwise **kept**. "Reconcile to empty on launch" is thus the scratch lane's policy, not a universal rule — one journal, one shredder, three retention policies.
+
+**Minimisation.** The pocket and stream lanes mean unobscured originals (pocket) and obscured photos (stream) now persist between sessions — a larger at-rest footprint than scratch alone. Two things bound it: the blobs are ciphertext whenever the device is locked or off, and each persistent lane has a retention bound — a TTL for the stream lane, and a bounded-with-a-nudge prompt for the pocket ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)). The store never silently destroys a pocket item the user has not decided on.
+
+### 8.9 The Light Table: persistent review and the switch-off commit
+
+The Light Table is the post-shutter and Mode B **review surface**: captured or imported frames lie on a persistent "table" awaiting a keep-or-discard decision. It is the pocket lane's one customer in v1.0, and it is where the "no recoverable cleartext source original" invariant meets a tray that must survive between sessions.
+
+**What it stores.** When a frame arrives, myClick obscures it in memory (Flow A; the in-memory original is **still zeroed at capture**, unchanged from [section 8.2](#82-flow-a--frame-accessible-capture-memory-only)) and writes the **encrypted original** into the pocket, together with a cached **obscured render** — the same safe-to-share image that would otherwise go to the Photos library. The original is kept (not an obscured-only copy) so a persisted frame can be re-reviewed in full later, **including manual face-fix**: decrypt the original in memory, re-detect, re-obscure, update the cached render, and zero the original again — identical to the live path. The cached render exists so the filmstrip paints without re-running the obscure pass on every open.
+
+**States and gestures.** Each pocket item is `undecided`, `stamped`, or gone:
+
+- **Keep (swipe down)** marks the frame `stamped`. This is a reversible state, not a commit — un-stamping returns it to `undecided`. The original stays in the pocket.
+- **Discard (swipe up)** crypto-shreds the item immediately: its content key is discarded and the frame is unrecoverable.
+- A frame left alone stays `undecided`, on the table, across launches.
+
+**Switch-off is the commit point**, and it is journaled and idempotent. When the user switches off the Light Table, the app walks the pocket: a `stamped` frame is decrypted in memory, its obscured render is written to the Photos library, and its original is then crypto-shredded; an `undecided` frame is left in the pocket to persist; discarded frames are already shredded. The journal marks the Photos write done **per item** before the shred, so an interrupted commit that re-runs on the next launch neither writes a photo twice nor loses one. After switch-off the table holds exactly the still-undecided frames.
+
+```mermaid
+flowchart TB
+    cap["Capture / import frame"] --> obs["Obscure in memory<br/>(original zeroed at capture)"]
+    obs --> put["Write encrypted original + cached render to the pocket<br/>state: undecided"]
+    put --> dec{"User decides"}
+    dec -->|swipe down| st["stamped<br/>(reversible)"]
+    dec -->|swipe up| sh["crypto-shred · gone"]
+    dec -->|left alone| un["undecided<br/>persists across launches"]
+    st --> off{{"switch off the light table"}}
+    un --> off
+    off -->|stamped| save["decrypt → Photos → shred original"]
+    off -->|undecided| keep["stays in the pocket"]
+
+    classDef mem fill:#eef,stroke:#88a,color:#000;
+    classDef disk fill:#fee,stroke:#a88,color:#000;
+    classDef plain fill:#fff,stroke:#bbb,color:#000;
+    class obs mem;
+    class put,st,un,sh,keep disk;
+    class cap,save plain;
+```
+
+**Per-device, by design.** Because the store key is never escrowed ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)), the Light Table is per-device: "untouched frames stay on the table" holds across launches on the same phone, but a restored or replaced phone starts with an empty table. Undecided review frames are local working state, and keeping the unobscured-original decryption capability off every escrow and backup path is the stronger posture.
+
+**Bounded with a nudge.** Undecided frames past a threshold (an age, and/or a count) raise a gentle prompt to decide on them. The store never silently deletes an undecided frame; the bound exists so the count of unobscured originals at rest does not grow without limit — the same data-minimisation logic the stream lane's TTL serves.
 
 ## 9. Revocation (key rotation; forward-immediate, forward-only)
 
