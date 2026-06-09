@@ -259,7 +259,13 @@ In both, a human looks at a specific face and chooses to act. There is no automa
 3. MobileFaceNet extracts the embedding on-device; the crop is then zeroed.
 4. The embedding is encrypted under that person's content key, exactly as an enrolment template ([section 4](#4-enrolment-face-to-encrypted-embedding)), and appended to their set. The server sees ciphertext only.
 
-**Staying inside the false-accept ceiling.** Deliberate correction grows the template set, and [section 4.4](#44-the-false-accept-asymmetry) is explicit that more templates raise the aggregate false-accept rate. So corrected captures are **not** unbounded: the set is **pruned to the best capture per angle cell** and **capped**, and the corrected-and-pruned set is held to the same hard false-accept ceiling (≤0.1%) as a sweep-only set. The exact cap, the pruning rule, and whether corrected (often harder-angle) captures are held to a stricter contribution are calibrated on the bench against real faces. The durable decision is that **correction never buys recall by spending the false-accept budget past the ceiling.**
+**Staying inside the false-accept ceiling.** Deliberate correction grows the template set, and [section 4.4](#44-the-false-accept-asymmetry) is explicit that more templates raise the aggregate false-accept rate. So corrected captures are bounded **three ways at once** (belt-and-braces):
+
+1. **Prune to the best capture per angle cell** — a correction replaces, rather than piles onto, the existing capture for that angle, so the set does not grow without bound as the same look is corrected repeatedly.
+2. **A hard cap** on total templates per person — once reached, a new correction evicts the weakest rather than adding.
+3. **A stricter match contribution for corrected captures** — a corrected template is held to a higher bar to *count toward a match* than a sweep template (the same mechanism as the sunglasses tier, [section 7.1](#7-recognition-on-device-matching)). A correction is often a harder angle, exactly where false-accepts concentrate, so it must clear more before it can keep a face visible.
+
+All three apply; the **exact** cap, the per-cell pruning rule, and the stricter-contribution margin are calibrated on the bench against real faces. The durable decision is that the corrected set is held to the same hard false-accept ceiling (≤0.1%) as a sweep-only set — **correction never buys recall by spending the false-accept budget past the ceiling.**
 
 **What it is not.** Not silent — every added template traces to a deliberate human correction of a specific face. Not unconsented — it only ever extends a biometric the corrector already owns. Not unbounded — it lives inside the [section 4.4](#44-the-false-accept-asymmetry) ceiling.
 
