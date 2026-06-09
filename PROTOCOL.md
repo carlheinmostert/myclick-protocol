@@ -166,7 +166,7 @@ Enrolment is how a face becomes an encrypted embedding. It is the one moment whe
 1. **Initiate.** A parent starts enrolment, for themselves or for a child. (Enrolling a dependent is the common case.)
 2. **Continuous sweep.** The app watches the live feed and harvests a short multi-angle set — front, three-quarter left, three-quarter right, up, down, and a smiling front — filling six angle slots as the subject moves, rather than marching through one fixed pose at a time. Frames stream through memory; only the best crop for each slot is kept, and only in memory. Nothing is ever written to disk.
 3. **Quality gates.** Each candidate frame is gated before it can fill a slot:
-   - A single face must be present. A frame with no face, or with more than one, is skipped — a slot cannot be filled while a second face is present, because we must never harvest the wrong child.
+   - An unambiguous enrolment **subject** must be present, and it is the only face processed. A frame with no face is skipped. A frame with more than one face is allowed **only under subject isolation**: the harvester takes the single dominant face — one face clearly larger and more central than any other, by a required margin — embeds **only** that face, and **blurs every other face in the preview and never detects-for-identity, embeds, or stores it**. If no face clears the dominance margin (two faces of similar size and position), the frame is skipped — fail-closed. The wrong-child harm is *harvesting the wrong face*; isolating and embedding only the unambiguous subject, while blurring and never processing everyone else, is what prevents it. This lets a parent enrol in a busy place without capturing bystanders, and is the enrolment counterpart of capture-time bystander obscuring.
    - The face must be large enough in the frame for a faithful crop.
    - The crop must be sharp — a variance-of-Laplacian focus check — so motion-blurred frames are dropped, not captured.
    - Lighting adequacy is a soft nudge, not a block.
@@ -231,13 +231,43 @@ Children's faces change, so templates go stale. We refresh them by **periodic, e
 
 The app reminds the parent; the parent redoes the sweep. That is the whole mechanism.
 
-We deliberately do **not** silently update templates as recognition succeeds in the field. Continuous "learning" — quietly folding each successful match back into the template set — would mean continuously re-processing a child's biometric in the background. That is precisely the always-on biometric harvesting myClick exists to avoid. Explicit re-enrolment keeps the promise true: **we only process a child's face when you ask us to.** This is a deliberate accuracy cost, paid on purpose to keep the no-background-harvesting guarantee honest.
+We deliberately do **not** silently update templates as recognition succeeds in the field. Continuous "learning" — quietly folding each successful match back into the template set — would mean continuously re-processing a child's biometric in the background. That is precisely the always-on biometric harvesting myClick exists to avoid, and it stays forbidden.
+
+What that rules out is *silent, automatic, success-driven* learning. It does **not** rule out **deliberate correction** — a person explicitly fixing a face the system got wrong and choosing to add it to enrolment (a parent in Mode A post-shutter review, or an operator at the Mode B lightroom). That is not silent and not automatic: it is a human acting on a specific face, which is exactly "you asking us to." Deliberate correction is specified in [section 4.7](#47-deliberate-correction-enrolment-progressive). The line is **silent success-folding (forbidden) vs explicit human correction (allowed)** — both periodic re-enrolment and deliberate correction keep the promise that **we only process a child's face when a person asks us to**; silent background learning is neither and remains barred.
 
 ### 4.6 The zeroing guarantee
 
 The enrolment face crops are zeroed from memory **explicitly in code**. They are held only in memory, and only for the duration of the enrolment-and-review session — at most the six crops needed for the template set — and are zeroed the moment embedding extraction completes at confirm, or immediately if the user abandons enrolment before confirming (cancel, back, or app backgrounding), in which case no embedding is extracted at all. At no point is a frame or crop written to disk. This is the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path never applies to enrolment. It is documented here and visible in the open-source code: a reviewer can read the source and confirm that the crops are zeroed and that there is no disk write of the raw image.
 
 We state the limit of that plainly. Source-level review proves the source does the right thing. **Binary-level verification — that the app actually shipped to the App Store does exactly this — awaits reproducible builds**, which we do not yet have. We will not imply more assurance than we can currently deliver. The source is auditable today; bit-for-bit verification of the shipped binary is future work.
+
+### 4.7 Deliberate correction enrolment (progressive)
+
+Recognition is only as good as enrolment, and the angles that fail in the field — a strong profile, a turned-and-down candid — are exactly the ones a one-time sweep under-covers. Rather than chase every angle at enrolment, myClick lets a person **deliberately correct** a wrongly-obscured face and fold that real, in-the-field capture back into enrolment. It is the explicit-human-action counterpart of the silent learning [section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning) forbids: the corrections target the *failures*, which are the captures the template set most needs.
+
+**Where it happens — deliberate surfaces only, never the background:**
+
+- **Mode A:** a parent, on the post-shutter review screen, taps a face that was obscured and identifies it as one of their own roster members.
+- **Mode B:** an operator, at the lightroom/review grid for an imported batch, corrects a misidentified face.
+
+In both, a human looks at a specific face and chooses to act. There is no automatic folding of successful matches.
+
+**The write path:**
+
+1. The correction names an **existing roster member the corrector is entitled to enrol** — themselves, or a dependent they own ([section 3](#3-key-hierarchy)). It can **never mint a new person or learn an unknown face** — that would create a persistent biometric for a non-consenting subject, which stays forbidden. It only ever re-labels among already-consented people.
+2. The corrected face crop is held **in memory only** (Flow A posture, [section 4.6](#46-the-zeroing-guarantee)) and must pass the same quality gate as enrolment ([section 4.1](#41-the-flow)); a poor crop is refused, so a bad capture cannot poison the set.
+3. MobileFaceNet extracts the embedding on-device; the crop is then zeroed.
+4. The embedding is encrypted under that person's content key, exactly as an enrolment template ([section 4](#4-enrolment-face-to-encrypted-embedding)), and appended to their set. The server sees ciphertext only.
+
+**Staying inside the false-accept ceiling.** Deliberate correction grows the template set, and [section 4.4](#44-the-false-accept-asymmetry) is explicit that more templates raise the aggregate false-accept rate. So corrected captures are bounded **three ways at once** (belt-and-braces):
+
+1. **Prune to the best capture per angle cell** — a correction replaces, rather than piles onto, the existing capture for that angle, so the set does not grow without bound as the same look is corrected repeatedly.
+2. **A hard cap** on total templates per person — once reached, a new correction evicts the weakest rather than adding.
+3. **A stricter match contribution for corrected captures** — a corrected template is held to a higher bar to *count toward a match* than a sweep template (the same mechanism as the sunglasses tier, [section 7.1](#7-recognition-on-device-matching)). A correction is often a harder angle, exactly where false-accepts concentrate, so it must clear more before it can keep a face visible.
+
+All three apply; the **exact** cap, the per-cell pruning rule, and the stricter-contribution margin are calibrated on the bench against real faces. The durable decision is that the corrected set is held to the same hard false-accept ceiling (≤0.1%) as a sweep-only set — **correction never buys recall by spending the false-accept budget past the ceiling.**
+
+**What it is not.** Not silent — every added template traces to a deliberate human correction of a specific face. Not unconsented — it only ever extends a biometric the corrector already owns. Not unbounded — it lives inside the [section 4.4](#44-the-false-accept-asymmetry) ceiling.
 
 ---
 
@@ -391,7 +421,7 @@ Recognition is the moment the product earns its name: faces are detected, matche
 1. **Detect.** Vision detects faces in the frame and returns their bounding boxes.
 2. **Extract.** MobileFaceNet extracts an embedding for each detected face, in memory.
 3. **Compare.** The device compares each face's embedding against the **active roster** — the union of the photographer's `can_capture` Clicks that are active at the current location in Mode A, or the explicitly-selected Click's roster in Mode B.
-4. **Decide.** A match above threshold against **any one** of a person's six templates keeps that face visible. No match obscures it.
+4. **Decide.** A face stays visible if it clears the threshold against **any one** of a person's templates; no match obscures it. The bar is **variant-aware**: an eyes-occluded template (sunglasses) is held to a **stricter** threshold than a bare or reading-glasses one. An occluded face carries far less of the discriminative signal — the eye region — so a sunglasses template is the one most likely to false-accept a stranger ([section 4.4](#44-the-false-accept-asymmetry)); the stricter bar is how we let someone be recognised in sunglasses without spending the false-accept budget. The tier only ever **raises** the bar for occluded templates and never lowers any bar, so bare and reading-glasses matching is unchanged. The occluded threshold is calibrated on the bench against real faces.
 5. **Zero.** Every detected face's embedding is zeroed the moment its decision is made.
 
 ### 7.2 The unconsented-face invariant (R2)
