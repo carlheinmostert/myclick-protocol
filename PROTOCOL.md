@@ -415,7 +415,7 @@ Recognition is the moment the product earns its name: faces are detected, matche
 1. **Detect.** Vision detects faces in the frame and returns their bounding boxes.
 2. **Extract.** MobileFaceNet extracts an embedding for each detected face, in memory.
 3. **Compare.** The device compares each face's embedding against the **active roster** — the union of the photographer's `can_capture` Clicks that are active at the current location in Mode A, or the explicitly-selected Click's roster in Mode B.
-4. **Decide.** A match above threshold against **any one** of a person's six templates keeps that face visible. No match obscures it.
+4. **Decide.** A face stays visible if it clears the threshold against **any one** of a person's templates; no match obscures it. The bar is **variant-aware**: an eyes-occluded template (sunglasses) is held to a **stricter** threshold than a bare or reading-glasses one. An occluded face carries far less of the discriminative signal — the eye region — so a sunglasses template is the one most likely to false-accept a stranger ([section 4.4](#44-the-false-accept-asymmetry)); the stricter bar is how we let someone be recognised in sunglasses without spending the false-accept budget. The tier only ever **raises** the bar for occluded templates and never lowers any bar, so bare and reading-glasses matching is unchanged. The occluded threshold is calibrated on the bench against real faces.
 5. **Zero.** Every detected face's embedding is zeroed the moment its decision is made.
 
 ### 7.2 The unconsented-face invariant (R2)
