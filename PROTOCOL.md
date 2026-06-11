@@ -32,7 +32,7 @@ If you already know public-key cryptography, you can skip straight to section 1 
 
 This is an on-ramp, not a textbook. The rest of the document is precise and assumes these ideas; here we name each one in a sentence or two and point to where it does its work. Nothing here is a requirement — no key sizes, no thresholds. Those live in the body, on purpose, so there is only one place to read them.
 
-- **Plaintext vs ciphertext.** Plaintext is the readable thing; ciphertext is the scrambled version you get after encrypting it, useless to anyone without the key. In myClick the only sensitive plaintext is a face image (briefly, during enrolment) and a decrypted embedding (briefly, during recognition); everything stored or sent is ciphertext. See sections 4 and 5.
+- **Plaintext vs ciphertext.** Plaintext is the readable thing; ciphertext is the scrambled version you get after encrypting it, useless to anyone without the key. In myClick the only sensitive plaintext is a face image (briefly, during enrolment, and when the owner of an enrolment views a stored capture crop — section 4.8) and a decrypted embedding (briefly, during recognition); everything stored or sent is ciphertext. See sections 4 and 5.
 - **Encrypted in transit vs encrypted at rest.** "In transit" (TLS) protects bytes while they travel over the network; "at rest" protects bytes while they sit on disk or in a database. myClick does both, and the threat model in section 1 lists each separately because they defend against different attackers.
 - **Symmetric keys.** A symmetric key is a single secret that both locks and unlocks — encrypt and decrypt with the same key. The vault key and each Click's group key are symmetric keys; see the key hierarchy in section 3.
 - **Public/private keypairs.** A keypair is two matched halves: a public half you can share freely and a private half you keep secret, such that what one half locks only the other half opens. The account's identity key is a keypair; see section 3.
@@ -40,7 +40,7 @@ This is an on-ramp, not a textbook. The rest of the document is precise and assu
 - **The Secure Enclave.** A dedicated hardware vault inside the iPhone. Keys generated there cannot be copied out — software, including myClick itself, can ask the Enclave to use a key but can never read it. The identity private key lives here; see section 3.
 - **Key escrow.** Safely backing up a key with a trusted party so it can be recovered if the device is lost. myClick escrows the vault key with iCloud Keychain rather than asking a parent to safeguard a recovery phrase; see sections 3.2 and 10.
 - **End-to-end encryption and server-blindness.** When only the endpoints (the users' devices) hold the keys, the server in the middle holds only locked boxes it cannot open. For myClick this is structural, not a promise we ask you to take on faith: there is no key on the server that could decrypt a child's biometric, by construction. See section 5 for the precise enumeration of what the server can and cannot see.
-- **Face embeddings are non-reversible.** A face embedding is a number-vector derived from a face; it is not a compressed photo, and you cannot rebuild the original image from it. That is the whole reason it is the only biometric artifact we ever persist. The rest of how matching works is in section 4.
+- **Face embeddings are non-reversible.** A face embedding is a number-vector derived from a face; it is not a compressed photo, and you cannot rebuild the original image from it. That is the whole reason it is the only biometric artifact that ever leaves the device. (Each of your own enrolment captures also keeps one small encrypted face crop on the device itself, so you can see what the app has actually learned — see section 4.8. That crop never leaves the phone.) The rest of how matching works is in section 4.
 
 ---
 
@@ -58,7 +58,7 @@ These are the adversaries the architecture exists to beat. If any of these wins,
 - **A server breach.** An attacker who steals the entire database — every row, every blob, every backup — gets only ciphertext. No plaintext embeddings, ever. There is no admin key, no "break glass" decrypt path, no master secret on the server that turns the stolen data into faces.
 - **A subpoena or state actor.** We cannot hand over what we cannot decrypt. The honest answer to a warrant for a child's biometric is "here is the ciphertext we hold; we have no key for it." This is a deliberate design property, not a legal posture we adopt after the fact — the inability is structural.
 - **A network eavesdropper.** Everything is TLS in transit and end-to-end encrypted at rest. An attacker watching the wire, or sitting on a compromised network path, sees encrypted bytes both in flight and as stored.
-- **A malicious Click member.** A member of one Click cannot extract the embeddings of children in Clicks they are not in — group keys are scoped per Click and never shared across them. No member can obtain raw photos of anyone's children, because raw photos are never stored or transmitted; only non-reversible embedding vectors exist. And no member can recognise children outside the Click's premises or scope, because recognition is gated by the active scope at capture time.
+- **A malicious Click member.** A member of one Click cannot extract the embeddings of children in Clicks they are not in — group keys are scoped per Click and never shared across them. No member can obtain face images of anyone else's children: no photo or face image is ever transmitted or stored server-side, and the only stored face image anywhere — the encrypted enrolment-capture sidecar of section 4.8 — exists solely on its owner's device, for that owner's own enrolled people, and never leaves it. And no member can recognise children outside the Click's premises or scope, because recognition is gated by the active scope at capture time.
 
 ### 1.2 What we concede (accepted risks, stated plainly)
 
@@ -83,7 +83,7 @@ Each construct below gets a precise definition and a one-line plain gloss.
   *In plain terms: the device-bound keypair that proves who you are and unlocks everything else.*
 - **Person (subject)** — the scope a content key belongs to: the holder of a content key and of the embeddings that content key encrypts. A person is a holder's own face or a dependent's, and it is the unit of cryptographic ownership — one person, one content key, one template set.
   *In plain terms: the face whose templates a single content key locks.*
-- **Embedding** — the ciphertext. A roughly 2048-byte face vector extracted on-device, persisted only in encrypted form. It is the sole biometric artifact ever stored, and it is not reversible into a photograph.
+- **Embedding** — the ciphertext. A roughly 2048-byte face vector extracted on-device, persisted only in encrypted form. It is the sole biometric artifact ever stored off-device — each owned capture may additionally carry a device-local encrypted crop sidecar (section 4.8), which never leaves the device — and it is not reversible into a photograph.
   *In plain terms: the encrypted number-vector that stands in for a face.*
 - **Content key** — one per person; the symmetric key that encrypts that person's templates. It is the only key applied directly to embedding ciphertext, and it is the small thing that gets wrapped for each audience (see the wraps below).
   *In plain terms: the key to one person's faces.*
@@ -124,7 +124,7 @@ flowchart TB
     vault["Vault key (symmetric)<br/>one per account · escrowed in iCloud Keychain"]
     gk["Group key (symmetric)<br/>one per Click · versioned, rotates on membership change"]
     ck["Content keys (symmetric)<br/>one per person"]
-    emb["Embedding ciphertext<br/>the only persisted biometric"]
+    emb["Embedding ciphertext<br/>the only biometric that leaves the device"]
 
     idk ==>|wraps| vault
     idk ==>|wraps for delivery| gk
@@ -159,25 +159,35 @@ The first three keys form the **biometric hierarchy**, and "three layers" refers
 
 ## 4. Enrolment (face to encrypted embedding)
 
-Enrolment is how a face becomes an encrypted embedding. It is the one moment where myClick handles a raw image of a child, so it is designed with the most care: the raw frames, and the small set of face crops kept from them, exist in memory only — for the brief enrolment-and-review session, never longer — and are then zeroed. Enrolment reads frames directly from the live camera feed, so it uses the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path ([section 8.3](#83-flow-b--os-owned-capture-disk-backed)) never applies, because iOS never hands enrolment a finished file.
+Enrolment is how a face becomes an encrypted embedding. It is the one moment where myClick handles a raw image of a child, so it is designed with the most care: the raw frames, and the working set of face crops kept from them, exist in memory only — for the brief enrolment-and-review session, never longer — and are then zeroed. The one image that outlives the session is each confirmed capture's tight matcher crop, sealed into an encrypted, device-bound sidecar ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)); the full frames never persist anywhere. Enrolment reads frames directly from the live camera feed, so it uses the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path ([section 8.3](#83-flow-b--os-owned-capture-disk-backed)) never applies, because iOS never hands enrolment a finished file.
 
 ### 4.1 The flow
 
 1. **Initiate.** A parent starts enrolment, for themselves or for a child. (Enrolling a dependent is the common case.)
-2. **Continuous sweep.** The app watches the live feed and harvests a short multi-angle set — front, three-quarter left, three-quarter right, up, down, and a smiling front — filling six angle slots as the subject moves, rather than marching through one fixed pose at a time. Frames stream through memory; only the best crop for each slot is kept, and only in memory. Nothing is ever written to disk.
+2. **Continuous sweep.** The app watches the live feed and harvests a short multi-angle set — front, three-quarter left, three-quarter right, up, down, and a smiling front — filling six angle slots as the subject moves, rather than marching through one fixed pose at a time. Frames stream through memory; only the best crop for each slot is kept, and only in memory. Nothing is written to disk during the sweep.
 3. **Quality gates.** Each candidate frame is gated before it can fill a slot:
-   - An unambiguous enrolment **subject** must be present, and it is the only face processed. A frame with no face is skipped. A frame with more than one face is allowed **only under subject isolation**: the harvester takes the single dominant face — one face clearly larger and more central than any other, by a required margin — embeds **only** that face, and **blurs every other face in the preview and never detects-for-identity, embeds, or stores it**. If no face clears the dominance margin (two faces of similar size and position), the frame is skipped — fail-closed. The wrong-child harm is *harvesting the wrong face*; isolating and embedding only the unambiguous subject, while blurring and never processing everyone else, is what prevents it. This lets a parent enrol in a busy place without capturing bystanders, and is the enrolment counterpart of capture-time bystander obscuring.
+   - An unambiguous enrolment **subject** must be present, and it is the only face processed. A frame with no face is skipped. A frame with more than one face is allowed **only under subject isolation**: the harvester takes the single dominant face — one face clearly larger and more central than any other, by a required margin (currently 1.6×) — embeds **only** that face, and **blurs every other face in the preview and never detects-for-identity, embeds, or stores it**. If no face clears the dominance margin (two faces of similar size and position), the frame is skipped — fail-closed. The wrong-child harm is *harvesting the wrong face*; isolating and embedding only the unambiguous subject, while blurring and never processing everyone else, is what prevents it. This lets a parent enrol in a busy place without capturing bystanders, and is the enrolment counterpart of capture-time bystander obscuring.
    - The face must be large enough in the frame for a faithful crop.
    - The crop must be sharp — a variance-of-Laplacian focus check — so motion-blurred frames are dropped, not captured.
    - Lighting adequacy is a soft nudge, not a block.
    - Pose must vary across the six slots so the template set covers a real range of angles.
    A frame that fails any gate is silently skipped; the app never captures a poor frame just to make progress.
 4. **Review.** When all six slots are filled, the user reviews the captured set and can redo any single slot, in which case the app re-harvests only that one look. The six crops remain in memory throughout; nothing is persisted until the user confirms.
-5. **Extraction.** On confirm, MobileFaceNet runs on-device and extracts the six embeddings from the held crops. No image leaves the phone for this step; there is no cloud call.
-6. **Zeroing.** The held crops are zeroed from memory the moment extraction is done. If the user abandons enrolment before confirming — cancel, back, or the app backgrounding — the crops are zeroed with no extraction at all. See section 4.6.
+5. **Extraction.** On confirm, MobileFaceNet runs on-device and extracts the six embeddings from the held crops. No image leaves the phone for this step; there is no cloud call. Each confirmed capture is stamped with a `capturedAt` timestamp (metadata, not biometric), and its tight aligned matcher crop — the exact image the embedding was computed from — is sealed into that capture's encrypted sidecar ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)).
+6. **Zeroing.** The held frames and crops are zeroed from memory the moment extraction and sidecar sealing are done. If the user abandons enrolment before confirming — cancel, back, or the app backgrounding — the crops are zeroed with no extraction and no sidecar at all. See section 4.6.
 7. **Encryption.** The embeddings are encrypted under the person's content key; that content key is wrapped under the account's vault key (and, once the person is opted into a Click, under that Click's group key — see [section 6.3](#63-content-key-indirection)).
 8. **Storage.** The ciphertext is stored locally and synced to the server. The server receives ciphertext only — it never sees a frame, never sees a plaintext embedding.
 9. **Consent read-back.** A consent read-back is recorded in the audit log: who enrolled whom, when, and under what consent statement.
+
+**The capture-trigger contract.** The subject-isolation gate above decides *which* face in a frame may be processed; this contract decides *when* the harvester may commit a capture at all. A capture MUST commit only while all three of the following hold:
+
+1. **Subject lock.** The face being captured MUST be the same physical face that was selected when the harvest armed. Lock is maintained by **geometric continuity only** — face-box overlap across consecutive frames; a face cannot teleport from one part of the frame to another between frames. Tracking MUST NOT use embeddings: bystanders are never embedded, not even to be rejected. Loss of lock MUST cancel any open capture window and silence the trigger until the locked subject is re-established as the clear dominant subject.
+2. **Clear winner.** The subject MUST clear the relative dominance margin of the subject-isolation gate (currently 1.6×): clearly larger and more central than any other face in the frame.
+3. **Dominance floor.** The subject MUST occupy at least a device-calibrated fraction of the frame — measured as face-box fraction until person segmentation lands, and as person-mask fraction once it does. The floor is absolute where the margin is relative: a face that is merely the largest of several small background faces is structurally ineligible, so background faces can never arm or feed a harvest.
+
+A frame in which any of the three fails is skipped, and a lock loss closes the capture window entirely — fail-closed, as everywhere in enrolment.
+
+One companion rule for what the user is shown: the subject mask that blurs every non-subject face in the live preview MUST equally be applied to any retained review snapshot. A frame kept for the user to look at is held to the same blur standard as the live preview — there is no review image in which a bystander's face is visible.
 
 ### 4.2 Liveness: light, not hard-gated
 
@@ -237,7 +247,7 @@ What that rules out is *silent, automatic, success-driven* learning. It does **n
 
 ### 4.6 The zeroing guarantee
 
-The enrolment face crops are zeroed from memory **explicitly in code**. They are held only in memory, and only for the duration of the enrolment-and-review session — at most the six crops needed for the template set — and are zeroed the moment embedding extraction completes at confirm, or immediately if the user abandons enrolment before confirming (cancel, back, or app backgrounding), in which case no embedding is extracted at all. At no point is a frame or crop written to disk. This is the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path never applies to enrolment. It is documented here and visible in the open-source code: a reviewer can read the source and confirm that the crops are zeroed and that there is no disk write of the raw image.
+The enrolment face crops are zeroed from memory **explicitly in code**. They are held only in memory, and only for the duration of the enrolment-and-review session — at most the six crops needed for the template set — and are zeroed the moment embedding extraction and sidecar sealing complete at confirm, or immediately if the user abandons enrolment before confirming (cancel, back, or app backgrounding), in which case no embedding is extracted and no sidecar is written at all. At no point is a raw frame written to disk, and no crop is ever written in the clear: the only image that persists is each confirmed capture's matcher crop, sealed encrypted into its sidecar ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)). The live-feed path is otherwise the frame-accessible, memory-only posture of capture Flow A ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); the disk-backed Flow B path never applies to enrolment. It is documented here and visible in the open-source code: a reviewer can read the source and confirm that the crops are zeroed, that no raw frame is written, and that the only persisted image is the encrypted sidecar.
 
 We state the limit of that plainly. Source-level review proves the source does the right thing. **Binary-level verification — that the app actually shipped to the App Store does exactly this — awaits reproducible builds**, which we do not yet have. We will not imply more assurance than we can currently deliver. The source is auditable today; bit-for-bit verification of the shipped binary is future work.
 
@@ -255,19 +265,47 @@ In both, a human looks at a specific face and chooses to act. There is no automa
 **The write path:**
 
 1. The correction names an **existing roster member the corrector is entitled to enrol** — themselves, or a dependent they own ([section 3](#3-key-hierarchy)). It can **never mint a new person or learn an unknown face** — that would create a persistent biometric for a non-consenting subject, which stays forbidden. It only ever re-labels among already-consented people.
-2. The corrected face crop is held **in memory only** (Flow A posture, [section 4.6](#46-the-zeroing-guarantee)) and must pass the same quality gate as enrolment ([section 4.1](#41-the-flow)); a poor crop is refused, so a bad capture cannot poison the set.
-3. MobileFaceNet extracts the embedding on-device; the crop is then zeroed.
-4. The embedding is encrypted under that person's content key, exactly as an enrolment template ([section 4](#4-enrolment-face-to-encrypted-embedding)), and appended to their set. The server sees ciphertext only.
+2. **Proximity guard.** A correction may only learn the face the user actually indicated. The source is re-detected, and the re-detected face box MUST substantially overlap the face the user tapped; if re-detection cannot confirm the indicated face, the correction MUST be refused with nothing learned — and the refusal says so plainly. A tap can never silently teach the system a different face than the one under the finger.
+3. The corrected face crop is held **in memory only** (Flow A posture, [section 4.6](#46-the-zeroing-guarantee)) and must pass the same quality gate as enrolment ([section 4.1](#41-the-flow)); a poor crop is refused, so a bad capture cannot poison the set. **Occlusion state is inferred conservatively:** if eye landmarks cannot be found on the corrected crop, the capture MUST be stored as eyes-occluded — which only ever *tightens* its bar, because occluded templates are held to the stricter variant tier ([section 7.1](#7-recognition-on-device-matching)). A mis-inference can over-restrict a template; it can never loosen one.
+4. MobileFaceNet extracts the embedding on-device; the capture is stamped `capturedAt`, its matcher crop is sealed into the capture's encrypted sidecar ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)), and the in-memory buffers are zeroed.
+5. The embedding is encrypted under that person's content key, exactly as an enrolment template ([section 4](#4-enrolment-face-to-encrypted-embedding)), and appended to their set. The server sees ciphertext only. **A failure here is reported honestly:** a storage or persistence failure MUST surface as a storage failure, never as a quality refusal — a failed write is not dressed up as a poor crop.
 
 **Staying inside the false-accept ceiling.** Deliberate correction grows the template set, and [section 4.4](#44-the-false-accept-asymmetry) is explicit that more templates raise the aggregate false-accept rate. So corrected captures are bounded **three ways at once** (belt-and-braces):
 
-1. **Prune to the best capture per angle cell** — a correction replaces, rather than piles onto, the existing capture for that angle, so the set does not grow without bound as the same look is corrected repeatedly.
-2. **A hard cap** on total templates per person — once reached, a new correction evicts the weakest rather than adding.
+1. **Prune to the best capture per angle cell** — a correction replaces, rather than piles onto, the existing capture for that angle, so the set does not grow without bound as the same look is corrected repeatedly. Legacy-migrated captures, which carry a sentinel pose rather than a measured one, are exempt from per-cell collapse until a real sweep replaces them — collapsing them by a pose they never measured would discard coverage blindly.
+2. **A hard cap** on total templates per person — once reached, a new correction evicts the weakest rather than adding. The cap MUST NOT evict the sole best capture of an occupied (pose, variant) cell: cell representation is protected, and the cap binds only on surplus beyond it, so capacity pressure can never silently erase an angle or variant the set had covered.
 3. **A stricter match contribution for corrected captures** — a corrected template is held to a higher bar to *count toward a match* than a sweep template (the same mechanism as the sunglasses tier, [section 7.1](#7-recognition-on-device-matching)). A correction is often a harder angle, exactly where false-accepts concentrate, so it must clear more before it can keep a face visible.
 
 All three apply; the **exact** cap, the per-cell pruning rule, and the stricter-contribution margin are calibrated on the bench against real faces. The durable decision is that the corrected set is held to the same hard false-accept ceiling (≤0.1%) as a sweep-only set — **correction never buys recall by spending the false-accept budget past the ceiling.**
 
+One scoping rule completes the budget: a scoped re-capture of one variant set (for example, redoing the sunglasses sweep) replaces only that set's **sweep** captures. Deliberate corrections survive a scoped re-capture and then compete per-cell as normal — redoing one sweep does not throw away the hard-won field corrections that fixed real failures.
+
 **What it is not.** Not silent — every added template traces to a deliberate human correction of a specific face. Not unconsented — it only ever extends a biometric the corrector already owns. Not unbounded — it lives inside the [section 4.4](#44-the-false-accept-asymmetry) ceiling.
+
+### 4.8 Enrolment capture sidecars (stored face crops)
+
+An embedding is the right thing to match with and the wrong thing to show a human. A parent looking at a roster of number-vectors cannot tell whether the third capture is their child mid-laugh or a blurry mistake; cannot see that a set has gone stale as the child grew; and, when the embedding model is upgraded, the only path forward would be to re-sweep every person from scratch. So each enrolment capture MAY carry exactly **one stored image sidecar**, under rules strict enough to keep every other guarantee in this document intact.
+
+**This revises a claim.** Earlier versions of this protocol stated that embeddings are the only persisted biometric artifact. That is no longer the whole truth, and we say so plainly: with sidecars, each owned enrolment capture may persist **one encrypted face crop on the owner's device**. The embedding remains the only biometric used for matching, and the only biometric ever stored off-device, synced, or transmitted. The sidecar is a deliberate, bounded exception — an image, not a vector — and every rule below exists to keep it bounded.
+
+**What the sidecar is.** The **tight aligned matcher crop only** — the exact image the embedding was computed from. Never the full frame; never a wider context crop. The crop shows precisely the face the embedding already represents, and nothing around it: no background, no scene, no other person.
+
+**Consent boundary — identical to embeddings.** Sidecars exist only for owned biometrics: the holder's own face, and dependents the holder enrolled ([section 3](#3-key-hierarchy)). A face that never gets a persisted capture never gets a sidecar — bystanders and strangers are untouched ([section 7.2](#72-the-unconsented-face-invariant-r2) stands unchanged), and a refused correction ([section 4.7](#47-deliberate-correction-enrolment-progressive)) leaves no sidecar behind.
+
+**Encryption and at-rest posture.** Each sidecar is encrypted with AES-GCM under its own per-file content key, wrapped by a Secure-Enclave-protected key — the same key discipline as the on-device encrypted store ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)). The file is written `NSFileProtectionComplete` and is excluded from all backups. It is never exported, never synced, never transmitted: the sidecar never leaves the device, on any path.
+
+**The only two decrypt uses.** A sidecar is decrypted only:
+
+1. for **on-screen display to the capture's owner**, in the roster and enrolment UI — the gallery is how an owner audits what the app has actually learned; and
+2. for **local re-embedding when the embedding model is upgraded** — a named, permitted use: the new model re-extracts embeddings from the stored crops, entirely on-device, so a model upgrade does not force every family to re-sweep.
+
+No other use is permitted. In particular, a sidecar is never an input to live recognition.
+
+**Lifecycle — 1:1 with its capture, no orphans.** A sidecar is crypto-shredded (key destroyed, file removed) the moment its capture is pruned, evicted, retaken, or its person deleted. One capture, at most one sidecar, with exactly the capture's lifetime. On every launch the app reconciles sidecars against captures and shreds any orphan — the same journal pattern as the capture scratch posture ([section 8.4](#84-the-hardened-flow-b)).
+
+**Default-on.** Sidecars are on by default. The stored crop is the transparency story — a roster a parent can look at and verify — not an optional extra.
+
+**A timestamp alongside.** Each capture also gains a `capturedAt` timestamp — metadata, not biometric — so staleness ([section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning)) is visible per capture rather than guessed per person.
 
 ---
 
@@ -321,7 +359,7 @@ This is the list that makes the "never on our servers" claim in [section 1.1](#1
 - **The account vault key.** It is escrowed in iCloud Keychain — that is, with Apple — and never on our servers. We are not in the escrow path at all (see [section 10](#10-key-escrow-and-recovery)).
 - **Any group key in unwrapped form.** The server only ever sees group keys wrapped under members' identity public keys. It never holds one it could actually use.
 - **Any plaintext embedding.** Decryption happens on-device, in memory, for the duration of a recognition session and no longer (see [section 7](#7-recognition-on-device-matching)).
-- **Any raw photo or face image.** These are never uploaded — not at enrolment, not at capture, not at import. The server has never seen a child's face and never will.
+- **Any raw photo or face image.** These are never uploaded — not at enrolment, not at capture, not at import. The on-device enrolment-capture sidecars ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)) never leave the device, so they change nothing here. The server has never seen a child's face and never will.
 
 ### 5.3 What the server can therefore infer
 
@@ -475,7 +513,7 @@ Mode B uses the same recognition engine described above, with one difference: th
 
 ## 8. Capture and import: source-original lifecycle
 
-The previous sections guarantee that three sensitive artifacts never persist in the clear: the **enrolment sweep frames** ([section 4](#4-enrolment-face-to-encrypted-embedding)), a **stranger's embedding** ([section 7.2](#72-the-unconsented-face-invariant-r2)), and the **decrypted roster** ([section 7.3](#73-roster-decryption-lifecycle-r1)). All three are memory-only by construction and are unaffected by anything in this section.
+The previous sections guarantee that three sensitive artifacts never persist in the clear: the **enrolment sweep frames** ([section 4](#4-enrolment-face-to-encrypted-embedding)) — whose confirmed matcher crops persist only as the encrypted, device-bound sidecars of [section 4.8](#48-enrolment-capture-sidecars-stored-face-crops), never in the clear — a **stranger's embedding** ([section 7.2](#72-the-unconsented-face-invariant-r2)), and the **decrypted roster** ([section 7.3](#73-roster-decryption-lifecycle-r1)). All three are memory-only or sealed-encrypted by construction and are unaffected by anything in this section.
 
 This section addresses a fourth artifact those guarantees do not cover: the **source original** — the actual photo or video being captured or imported, before myClick has obscured the faces in it. It is the frame the camera produces, or the file a Mode B import hands us. Until it is obscured, it is the most sensitive plaintext the product ever handles in bulk: a clear image that may contain unconsented children.
 
