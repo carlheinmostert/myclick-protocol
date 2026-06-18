@@ -155,6 +155,14 @@ The first three keys form the **biometric hierarchy**, and "three layers" refers
 
 **A group key with rotation on membership change, not a full double-ratchet.** A messaging protocol like Signal uses a double-ratchet to get per-message forward secrecy, because a chat is a continuous stream of messages and each one should be independently protected. A Click's embedding roster is not a message stream — it is a relatively static set that changes only when someone joins or leaves. Per-message forward secrecy would be overkill and would add messaging-grade complexity for no benefit. A per-Click group key that rotates on every membership change achieves exactly the guarantees we need — forward-immediate and forward-only revocation (section 9) — without that complexity.
 
+### 3.3 Concrete primitives (locked 2026-06-18)
+
+Sections 3.1–3.2 fix the *shape* of the hierarchy — which key wraps which, and that recovery is by iCloud Keychain escrow. The concrete primitives below were left implicit in earlier drafts; they are pinned here so the implementation has no cryptographic decision to improvise (the "protocol-spec-first" rule). All three deliberately match constructions myClick already ships on-device (the encrypted store and `RosterCryptoKey`), introducing no new cryptography. They are sound, standard defaults locked for v1; the formal protocol audit remains the place where they receive adversarial scrutiny.
+
+- **AEAD mode — AES-256-GCM.** Every symmetric encryption in the biometric hierarchy — the vault key and each group key protecting content keys, and each per-person content key protecting its embedding template set — uses **AES-256-GCM**. This is the same authenticated mode sections 4.8 / 8.8 fix for the on-device store; section 3 now states it explicitly for the escrowed hierarchy too.
+- **Asymmetric wrap — ECIES over P-256.** Wrapping a symmetric key *under an identity public key* — the vault key on-device at rest, and each group key for delivery to a member (section 3.1) — uses **ECIES over P-256**: an ephemeral ECDH to the recipient's P-256 public key, HKDF-SHA256 to derive the wrapping key, then AES-256-GCM. The wrapped form is self-describing on-device and crosses the Storage Port only as an opaque blob; if cross-implementation interop of the wire format is ever required, that format is pinned at that time.
+- **Vault-key recovery — the iCloud Keychain escrow is canonical.** The vault key is held two ways (section 3.1): wrapped under the identity key for on-device-at-rest protection, and escrowed in iCloud Keychain. The **escrow is the authoritative recovery artifact** — the identity key is device-bound and dies with the phone (section 10.2), so a replaced device recovers the vault key from iCloud Keychain, never from any on-device wrap.
+
 ---
 
 ## 4. Enrolment (face to encrypted embedding)
