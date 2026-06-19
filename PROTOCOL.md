@@ -450,7 +450,7 @@ The payoff is rotation cost. When membership changes and the group key must rota
 
 ### 6.4 Rotation on every membership change
 
-Every time membership changes — someone joins, someone leaves, someone is removed — the group key rotates:
+Adding a member does **not** rotate the key — admission distributes the *current* key to the newcomer ([section 6.2](#62-distribution-rides-on-admin-approval)), since an addition only grants access and needs no forward secrecy. Rotation is the response to a member **leaving or being removed**. Every such departure rotates the group key:
 
 1. A new group key is generated.
 2. It is wrapped for each remaining member under that member's identity public key.
