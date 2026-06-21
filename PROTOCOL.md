@@ -400,6 +400,23 @@ We concede this metadata in [section 1.2](#12-what-we-concede-accepted-risks-sta
 
 **Storage substrate: Postgres `bytea` for embeddings.** Embedding data is small — roughly 12 KB per person for the six-template set in plaintext; the stored ciphertext, plus its small content-key wraps, is modestly larger — so it lives directly in Postgres as `bytea`. There is no efficiency reason to push it into object storage at this scale. Any larger encrypted artifacts that arise would use storage buckets configured with no server-side decrypt key, but at v1 there is nothing large enough to need them.
 
+### 5.6 App-domain names are server-blind too — including the account's own name
+
+The same "the server holds only ciphertext" guarantee extends past embeddings to the app-domain **names** the product shows. A person's display name is sealed under that person's content key; a Click's name under the Click's group key; and the **account's own display name** — the human name a member shows to the people around them — is sealed *separately for each audience that should read it*, under the key that audience already holds. No new key material is introduced anywhere; each name is "just one more thing an existing key locks".
+
+An account's display name has **four audiences**, and is sealed four ways:
+
+| Audience | Reads it where | Sealed under | Why that key |
+|----------|----------------|--------------|--------------|
+| **Self**, across the account's own devices | the user's own profile | the account **vault key** | per-account, escrowed in iCloud Keychain (§3.1/§10) — recovers on a new device; no other account holds it |
+| **Co-members** of a Click | the member list | that Click's **group key** | every current member already holds it (§6.2); the server holds only ciphertext |
+| **The admitting admin**, *before* the group key is shared | the admit queue | the **inviter's identity public key** (ECIES over P-256) | admission is the moment the group key is distributed (§6.2), so a pending member cannot yet seal under it — they seal to the inviter/admin's identity key instead, which only that admin's Secure Enclave can open |
+| **The invitee**, *before* joining | the invite preview | the Click **group key** (carried in the invite link) | the link hands the invitee the group key, so they can read who invited them and the Click name |
+
+The construction in each row is one already fixed in §3.3: AES-256-GCM under the vault or group key for the symmetric paths, and ECIES over P-256 (ephemeral ECDH → HKDF-SHA256 → AES-256-GCM) for the seal-to-identity-public-key path — the identical primitive that delivers a group key to a member, applied to the name bytes instead of a key. Every form is ciphertext at rest; **the server reads none of them**, and the "what we store" list stays as short for the account name as it is for a child's face.
+
+Two consequences recorded honestly. First, the pending-member path assumes — in the v1/beta scope — that **the inviter is the admin who admits**; a different admin holds a different identity key and would see only the id-stub placeholder for that pending member (fail-closed, no leak). Multi-admin reveal is a post-beta refinement. Second, the two group-key-sealed name forms (a member's name, an inviter's name) are bound to a group-key version, so **rotation (§6.4) must re-seal them under the new version**, exactly as it must re-seal the Click name; the self name (vault key) and the pending name (identity public key) are not group-key-bound and are unaffected. The data-model records the storage columns, RPCs, and the rotation obligation (`docs/data-model.md` §9.6).
+
 ## 6. Per-Click group key (the ratchet)
 
 This section consolidates the group-key decisions from [section 3](#3-key-hierarchy) and the sharing-mechanic design into one place. It is the mechanism that lets every current member of a Click recognise the children opted into it, and lets revocation work the moment membership changes.
