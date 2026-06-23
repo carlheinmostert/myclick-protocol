@@ -2,7 +2,7 @@
 
 **Status: DRAFT — in active design (2026-05-28). Nothing here is final.**
 
-All eleven sections are drafted as of 2026-05-28. This is still a draft, not a final spec: the empirical calibration (template count, match threshold, false-accept ceiling, re-enrolment bands) is validated in the closed beta, and the v2 metadata-hiding items in section 11 remain open. Everything here is subject to change as the design firms up — this banner will be updated as sections lock.
+All twelve sections are drafted; section 11 (streaming relay and distribution) specifies the post-v1.0 guardian photo-return feature and lands after the v1.0 surfaces it depends on. This is still a draft, not a final spec: the empirical calibration (template count, match threshold, false-accept ceiling, re-enrolment bands) is validated in the closed beta, and the v2 metadata-hiding items in section 12 remain open. Everything here is subject to change as the design firms up — this banner will be updated as sections lock.
 
 This document specifies the cryptographic protocol behind myClick: how faces become encrypted embeddings, how members of a Click share the ability to recognise each other's children, how the server stays unable to decrypt anything sensitive, and how revocation works.
 
@@ -23,7 +23,8 @@ This protocol is being designed in the open. See the commit history for how it e
 8. [Capture and import: source-original lifecycle](#8-capture-and-import-source-original-lifecycle)
 9. [Revocation (key rotation; forward-immediate, forward-only)](#9-revocation-key-rotation-forward-immediate-forward-only)
 10. [Key escrow and recovery](#10-key-escrow-and-recovery)
-11. [Open questions](#11-open-questions)
+11. [Streaming relay and distribution](#11-streaming-relay-and-distribution)
+12. [Open questions](#12-open-questions)
 
 ---
 
@@ -334,7 +335,7 @@ Storing an enrolment ([section 4.1](#41-the-flow), steps 7–9) is not a single 
 
 **A partial write is invisible to recognition.** Recognition reads only the **approved roster** — the set of persons whose opt-in has been approved ([section 7.3](#73-roster-decryption-lifecycle-r1)) — and the opt-in approval is the *last* step of the write. A person whose write failed before that step has no approved opt-in, so the recognition pipeline never sees them: a half-written enrolment cannot cause a wrong match and cannot leak. This is the same gate as ordinary consent — pending means not in the roster, whether because an admin has not yet approved or because the write did not finish. The worst consequence of an interrupted enrolment is an abandoned record on the storage layer, never an unsafe recognition; the storage layer's own housekeeping reclaims such records, and doing so is hygiene, not a safety dependency.
 
-**Two refinements remain open** (not yet specified here, listed in [section 11](#11-open-questions)): folding the three make-live steps — the group-key content wrap, the opt-in, and its approval — into a single atomic operation so a person can never be momentarily in the roster without its key; and version-tagging a model-upgrade re-embed ([section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning), [section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)) so a person can never be left half on the old model and half on the new. Neither is required for the resumability property above; both are next refinements.
+**Two refinements remain open** (not yet specified here, listed in [section 12](#12-open-questions)): folding the three make-live steps — the group-key content wrap, the opt-in, and its approval — into a single atomic operation so a person can never be momentarily in the roster without its key; and version-tagging a model-upgrade re-embed ([section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning), [section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)) so a person can never be left half on the old model and half on the new. Neither is required for the resumability property above; both are next refinements.
 
 ---
 
@@ -405,7 +406,7 @@ We concede this metadata in [section 1.2](#12-what-we-concede-accepted-risks-sta
 
 ### 5.5 Two decisions recorded here
 
-**Premises are server-visible in v1.** The geofence polygons live on the server so they can sync to every member's device, which means the server can infer roughly where a Click operates. This sits inside the metadata concession already made in [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly) — it is not a new concession, just the concrete form of one. Premises-encryption, which would hide locations from the server, is deferred to v2 along with the rest of metadata-hiding (see [section 11](#11-open-questions)).
+**Premises are server-visible in v1.** The geofence polygons live on the server so they can sync to every member's device, which means the server can infer roughly where a Click operates. This sits inside the metadata concession already made in [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly) — it is not a new concession, just the concrete form of one. Premises-encryption, which would hide locations from the server, is deferred to v2 along with the rest of metadata-hiding (see [section 12](#12-open-questions)).
 
 **Storage substrate: Postgres `bytea` for embeddings.** Embedding data is small — roughly 12 KB per person for the six-template set in plaintext; the stored ciphertext, plus its small content-key wraps, is modestly larger — so it lives directly in Postgres as `bytea`. There is no efficiency reason to push it into object storage at this scale. Any larger encrypted artifacts that arise would use storage buckets configured with no server-side decrypt key, but at v1 there is nothing large enough to need them.
 
@@ -516,7 +517,7 @@ The protocol's rule:
 
 4. **The consent rule — who may act.** Becoming a co-guardian of the canonical record happens **only** through the existing two-sided guardian grant: an existing guardian *proposes* the specific account, and **only that named account** can *accept* (the app-domain `propose_guardian` → `accept_guardian` handshake; data model, "Guardianship and the co-parent solution"). The duplicate resolution **initiates** that handshake; it never bypasses it, never self-mints guardianship over a child an account was not invited to guard, and never silently merges or moves a biometric across accounts. A guardian may always revoke, pause, or opt out **a record they guard** — and those acts now operate on the one canonical record, so removal actually removes the child.
 
-This is a **nudge, not a hard guarantee.** Two genuinely different look-alike children must remain enrollable, so the check is overridable, and two uncoordinated guardians who both dismiss it can still produce two records; an admin reconciliation step (an app-domain tool for institutional Clicks, where the admin holds the one canonical roster) closes the residual. No key material, wrap chain, or rotation rule changes here — this is a consent-and-flow rule layered on the existing content-key indirection ([section 6.3](#63-content-key-indirection)) and the existing two-sided guardian grant. The exact match threshold, the merge mechanics, and whether a confirmed-same second biometric is discarded or folded in as additional templates of the one record are deferred to the build (adjacent to [section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning) / [section 4.9](#49-the-enrolment-write-is-idempotent-and-resumable-the-client-owns-the-person-id)) and listed in [section 11](#11-open-questions).
+This is a **nudge, not a hard guarantee.** Two genuinely different look-alike children must remain enrollable, so the check is overridable, and two uncoordinated guardians who both dismiss it can still produce two records; an admin reconciliation step (an app-domain tool for institutional Clicks, where the admin holds the one canonical roster) closes the residual. No key material, wrap chain, or rotation rule changes here — this is a consent-and-flow rule layered on the existing content-key indirection ([section 6.3](#63-content-key-indirection)) and the existing two-sided guardian grant. The exact match threshold, the merge mechanics, and whether a confirmed-same second biometric is discarded or folded in as additional templates of the one record are deferred to the build (adjacent to [section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning) / [section 4.9](#49-the-enrolment-write-is-idempotent-and-resumable-the-client-owns-the-person-id)) and listed in [section 12](#12-open-questions).
 
 ## 7. Recognition (on-device matching)
 
@@ -855,15 +856,111 @@ For institutional Clicks such as schools, multiple admins is therefore **strongl
 
 ### 10.4 The remaining open case
 
-The one case not yet fully designed is the rare worst case: **all** admins of a Click simultaneously losing access. Multiple admins mitigates this — the more admins, the less likely — but it does not formally close it. The complete recovery design for the all-admins-lost case is noted as open work in [section 11](#11-open-questions).
+The one case not yet fully designed is the rare worst case: **all** admins of a Click simultaneously losing access. Multiple admins mitigates this — the more admins, the less likely — but it does not formally close it. The complete recovery design for the all-admins-lost case is noted as open work in [section 12](#12-open-questions).
 
-## 11. Open questions
+## 11. Streaming relay and distribution
+
+The sections so far cover capture, recognition, and the obscured photo that lands in the photographer's own Light Table ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)). This section covers what happens when the photographer chooses to send a copy out to the other guardians of a Click — the post-v1.0 feature whose product working name is "the Stream." It specifies the **stream lane's server relay** that [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal) deferred ("its server relay is specified separately").
+
+The whole of it is a single discipline, identical to the one the rest of the document already keeps: **the relay is blind.** The shared photo crosses the server as ciphertext, sealed under the Click's group key exactly as embeddings are; the server stores ciphertext and routing metadata and never holds a key, never decrypts, never sees a face. Everything below is the precise form of that one guarantee for a streamed photo, plus the two membership-change cases — group-key rotation and a guardian withdrawing distribution — that act on photos already in flight.
+
+This feature depends on v1.0 surfaces — the group key ([section 6](#6-per-click-group-key-the-ratchet)), the encrypted face-region knowledge produced at capture, the on-device store and Light Table ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal), [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)) — so it is specified here, after them. The app-domain model (the `stream_blob`, `stream_entitlement`, `optin.distribute`, and `membership.receive_scope` storage, the RPC surface, the trial and subscription rules) lives in the companion data model; this section fixes only the cryptography and the server-blind data flow. The on-device-only attention record ("seen-map") that the stream-browsing UI keeps is local review state, server-invisible by construction, and is recorded in the data model alongside the pocket journal and `displayOrder` — it is not part of this protocol.
+
+### 11.1 Two obscured versions on the photographer's device
+
+Sharing introduces a **second** obscured version of a captured photo, distinct from the photographer's own copy. Mode A capture already produces the photographer's own copy, dying-in-memory ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)): strangers obscured, the recognised children of the Click clear. Sharing derives a **shared copy** from that reviewed photo in which **strangers and every sharing-off recognised child are obscured, and only sharing-on children remain clear.**
+
+The shared copy is built **lazily, at Share time, from the reviewed copy** — not eagerly at capture. The build is the same pixel operation as the withdrawal re-blur of [section 11.7](#117-withdrawal-re-publish-the-relay-stops-the-device-re-blurs): the device blurs the known face regions of the sharing-off subjects. No re-detection is needed — the subject face regions are already known from the capture-time recognition pass and are carried in the encrypted face-region sidecar ([section 11.3](#113-the-blind-relay)). "Sharing-on" is the per-child distribution consent (the data model's `optin.distribute`, guardian-set, no silent default); the off-switch fully protects a child even when a recipient is viewing the Click's whole stream ([section 11.4](#114-the-delivery-gate-server-blind)). The shared copy is the only version that ever reaches the relay; the photographer's own clear-of-recognised-children copy never leaves the device except by the ordinary Download-to-Photos action ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)).
+
+### 11.2 Per-blob content key, wrapped under the group key
+
+The shared copy is sealed under a **fresh per-blob content key** — AES-256-GCM, the same authenticated mode fixed in [section 3.3](#33-concrete-primitives-locked-2026-06-18) — generated on the device for this one blob. That per-blob key is then **wrapped under the Click's current GroupKeyVersion**, the identical ContentKeyWrap-under-group-key construction that seals an embedding's content key for a Click ([section 6.3](#63-content-key-indirection)). One blob, one content key, one wrap under the group key the Click's members already hold.
+
+This indirection is what makes shredding cheap and revocation exact, exactly as it is for embeddings:
+
+- **Crypto-shred = discard the wrap and delete the storage object.** Destroying a streamed blob means discarding its `wrapped_blob_key` and deleting the ciphertext object from Storage. The bytes become unrecoverable immediately — no dependence on a remote overwrite — while the group key lives on for the Click and all its other blobs. This is the same crypto-shred discipline the on-device store uses ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)), applied to a server object: the per-blob key is the small thing that dies.
+- **Rotation re-wraps the small thing, not the blob.** Because only the per-blob key is wrapped under the group key, a group-key rotation re-wraps each unshredded blob's key — a handful of bytes — and never re-encrypts the photo itself ([section 11.6](#116-group-key-rotation-re-seals-unshredded-blobs)).
+
+### 11.3 The blind relay
+
+The device uploads the shared copy as ciphertext to Supabase Storage (CDN-fronted), accompanied by one metadata row. The server stores **only ciphertext plus metadata**; it holds no key and never decrypts — the same server-blindness fixed for embeddings in [section 5.2](#52-what-the-server-never-holds), now extended to obscured shared photos.
+
+The metadata row for a streamed blob carries:
+
+- `click_id` — the Click this blob belongs to.
+- `group_key_version_id` — the GroupKeyVersion the `wrapped_blob_key` is wrapped under, so a member knows which group-key generation unwraps it.
+- `uploaded_by`, `uploaded_at` — the photographer account and the upload time.
+- `expires_at` — `uploaded_at` + the Click's stream TTL ([section 11.5](#115-crypto-shred-at-the-ttl-window)).
+- `state` — `developing` or `fixed` ([section 11.4](#114-the-delivery-gate-server-blind)).
+- `storage_path` — where the ciphertext object lives.
+- `wrapped_blob_key` — the per-blob content key wrapped under `group_key_version_id` ([section 11.2](#112-per-blob-content-key-wrapped-under-the-group-key)); set to null when the blob is crypto-shredded.
+- **Subject `person_id` tags** — the set of sharing-on recognised children present in the shared copy, for routing ([section 11.4](#114-the-delivery-gate-server-blind)). These are opaque person ids, never a face and never a name.
+- **The encrypted face-region sidecar** — the subject face bounding boxes, sealed under the **group key** (AES-256-GCM under `group_key_version_id`), so any current member's device can decrypt the regions to perform a withdrawal re-blur ([section 11.7](#117-withdrawal-re-publish-the-relay-stops-the-device-re-blurs)) without re-detecting faces. The server stores this sidecar as ciphertext like everything else; it never reads a bounding box.
+
+The subject tags are the only field that is plaintext-meaningful to the server, and they are deliberately so — routing needs them. Their privacy cost is stated in [section 11.9](#119-metadata-leak-co-appearance-by-id).
+
+### 11.4 The delivery gate (server-blind)
+
+A caller may download a streamed blob's ciphertext **iff all four** of the following hold. The gate is enforceable without the server ever decrypting anything — it reasons over membership, entitlement, scope, and state, all of which are metadata.
+
+1. **Membership.** The caller is a current member of the blob's Click — they hold the current group key, so they can unwrap the blob key once they receive it. A non-member is refused outright.
+2. **Active entitlement.** The caller holds an active streaming entitlement. The check is **source-agnostic**: an own subscription, an in-window trial, or a school-sponsored entitlement all satisfy it identically. The relay reads the entitlement's status, not its source — baking source-agnosticism in now costs nothing and keeps the school-sponsored door open without a speculative commitment.
+3. **Receive-scope match.** The caller's per-Click receive scope determines which of the Click's blobs they may pull:
+   - **Just-mine** delivers only blobs whose subject-tag set **intersects the caller's guarded persons** — the dependents they own who are opted into this Click.
+   - **Everything** delivers all the Click's blobs, subject to a **Click-shape gate**: in a symmetric Click (family, peer, class) any member may choose "everything"; in an asymmetric Click (school) "everything" is staff/admins only, and an ordinary member is held to just-mine. This reuses the symmetric/asymmetric distinction the capturer-ACL already draws in the model. "Everything" still respects per-child distribution consent at the pixel level — every sharing-off child was already blurred in the shared copy ([section 11.1](#111-two-obscured-versions-on-the-photographers-device)), so the off-switch fully protects a child even inside the whole-stream view.
+4. **Fixed state.** The blob is `fixed`. A `developing` blob is view-only to recipients and not yet downloadable ([section 11.8](#118-the-developing-state-and-its-honest-limit)).
+
+A caller who is a member but holds **no active entitlement** is given only a **count** of waiting photos — never a teaser image, never a degraded-resolution preview. The transparent count is the only thing the un-entitled member sees; the blast-radius of a child's distribution consent is "this Click's subscribing members," not only the guardians of co-photographed children.
+
+When the gate passes, the server returns the ciphertext and the metadata row; the caller's device unwraps the per-blob key with the group key and decrypts locally. Receiving is decoupled from enrolment: any entitled member may receive — a grandparent or coach with no child in the roster receives under "everything" (subject to the Click-shape gate); what is paid for is the right to receive, not the right to receive a specific child.
+
+### 11.5 Crypto-shred at the TTL window
+
+Each blob carries `expires_at` = `uploaded_at` + the Click's stream TTL (default 30 days, Click-configurable within a 7-to-90-day range; the value is an app-domain setting in the data model). At `expires_at` the relay **automatically crypto-shreds the blob**: it discards `wrapped_blob_key` and deletes the storage object ([section 11.2](#112-per-blob-content-key-wrapped-under-the-group-key)). The photo is then gone from the relay and from any recipient's in-app gallery that had not downloaded it before expiry.
+
+A copy a recipient already **Downloaded** into their Apple Photos survives the shred — that is the ordinary forward-only limit ([section 9.3](#93-forward-only-stated-plainly)): once a photo is saved to someone else's library it is out of reach. The TTL governs the relay and the parents' in-app gallery; it does not govern the photographer's own Light Table copy, which has its own much longer bounded-with-a-nudge local leash ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)).
+
+### 11.6 Group-key rotation re-seals unshredded blobs
+
+A group-key rotation is the response to a member leaving or being removed ([section 6.4](#64-rotation-on-every-membership-change)); it is the engine of revocation ([section 9](#9-revocation-key-rotation-forward-immediate-forward-only)). Streaming **extends the rotation's re-seal set**: in addition to re-wrapping the roster content keys and the group-key-sealed member, inviter, and Click names ([section 5.6](#56-app-domain-names-are-server-blind-too--including-the-accounts-own-name)), a rotation now also re-seals, **for the remaining members**, every **unshredded** stream blob — both its `wrapped_blob_key` and its encrypted face-region sidecar, which are both sealed under the group key.
+
+- The **removed member is excluded** from the re-seal, so they lose access to all in-flight blobs immediately — forward-immediate revocation, the same property rotation already gives for embeddings.
+- **New members are forward-only:** admission distributes the current group key ([section 6.2](#62-distribution-rides-on-admin-approval)) but does **not** back-fill a newcomer with the pre-join blobs. A new member receives blobs uploaded after they joined, not a backlog.
+- Shredded blobs are skipped — there is no key left to re-wrap.
+
+The rationale is that a routine membership change must not silently empty the remaining parents' pending galleries. Re-sealing only the small per-blob keys and the small face-region sidecars — never the photo bytes — keeps this cheap at school scale, exactly as the content-key indirection does for embeddings ([section 6.3](#63-content-key-indirection)).
+
+### 11.7 Withdrawal re-publish: the relay stops, the device re-blurs
+
+When a guardian withdraws distribution consent for a child (flips that child's `optin.distribute` to false), every in-flight (unshredded) blob for which that child is a subject is reconciled by a **re-publish**, not by pulling the whole photo. The relay never edits a pixel; a device does, and the server stays blind throughout:
+
+1. **The relay immediately stops serving** the affected blob — the delivery gate ([section 11.4](#114-the-delivery-gate-server-blind)) refuses it pending re-publish.
+2. **The withdrawing guardian's own device downloads** the blob's ciphertext, decrypts it with the group key, and **re-blurs the child** using the encrypted face-region sidecar ([section 11.3](#113-the-blind-relay)) — the exact known region, no re-detection — which is the same pixel operation as the lazy shared-copy build ([section 11.1](#111-two-obscured-versions-on-the-photographers-device)).
+3. The device **re-seals the re-blurred image** under a fresh per-blob key wrapped under the current group key ([section 11.2](#112-per-blob-content-key-wrapped-under-the-group-key)) and **uploads it as a new blob version.**
+4. The **old version is crypto-shredded** (its wrap discarded, its object deleted), and honest clients purge any cached copy they had not yet Downloaded.
+5. **Already-saved copies are forward-only** — a recipient who already Downloaded the old version into their Apple Photos keeps it, and we cannot reach into their library. This is stated plainly, the same limit as everywhere ([section 9.3](#93-forward-only-stated-plainly)).
+
+The withdrawing guardian's device may download **its own child's** blobs regardless of subscription, because this is a privacy operation, not a convenience receive — withholding the re-blur capability behind a paywall would make the off-switch unusable. The rejected alternatives are recorded in ADR-0015 in the myClick working repo: pulling the whole photo from everyone (too blunt — it punishes the families of co-photographed children) and minting a per-recipient version (cryptographically infeasible cheaply).
+
+### 11.8 The developing state and its honest limit
+
+A blob shared to the line is `developing` for a short cool-off, then `fixed` ([section 11.4](#114-the-delivery-gate-server-blind)). While developing, recipients may **view** but not yet **Download**, and the photographer can recall it entirely (drag back to the table = total recall, the relay crypto-shreds it). After it fixes, recipients may Download and recall becomes forward-only.
+
+"View-only while developing" is an **app-enforced courtesy for honest clients, not a cryptographic guarantee.** A developing blob's ciphertext is delivered to the viewing client and decrypted there — that is what "view" requires — so a **hostile recipient client that already decrypted a developing blob to display it could retain a copy.** This is the same universal limit as a screenshot of anything shown on a screen, and it falls inside the concessions the threat model already makes for a compromised or hostile endpoint ([section 1.2](#12-what-we-concede-accepted-risks-stated-plainly)) and the already-published-photos limit ([section 9.3](#93-forward-only-stated-plainly)). We state it as an accepted trust assumption in the spirit of [section 1.3](#13-accepted-trust-assumptions-pre-production) and do **not** oversell "no escape": the develop/fix distinction is a genuine recall window against ordinary, honest use, not an unbreakable hold against a determined recipient.
+
+### 11.9 Metadata leak: co-appearance by id
+
+The subject `person_id` tags ([section 11.3](#113-the-blind-relay)) are visible to the server because routing the delivery gate needs them. They therefore reveal to the server **which persons co-appear in a photo within a Click** — by opaque id, never by face and never by name. This is **incremental co-appearance metadata on top of the social and institutional graph the server already concedes** ([section 5.3](#53-what-the-server-can-therefore-infer)): the server already sees who is in which Click together; the subject tags add which of those persons were in the same shared photo.
+
+This is a deliberate v1 concession for the streaming feature, of exactly the kind [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly) catalogues, and it folds into the **v2 metadata-hiding** scope already deferred in [section 12](#12-open-questions) — the same work that would blind the server to the membership graph would also blind it to co-appearance. It is also recorded for the DPIA. No biometric is exposed: a subject tag is an id, the photo is ciphertext, and the server can no more reconstruct a face from a streamed blob than from an embedding.
+
+## 12. Open questions
 
 These are the things we have deliberately deferred or not yet pinned down. We list them here for the same reason we list the conceded threats in [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly): an auditor should be able to see the edges of what is designed, not just the middle.
 
 **Deferred to v2**
 
-- **Metadata-hiding.** Sealed-sender-style protection that would blind the server to the social graph and to timing. In v1 the server can infer who is in which Clicks together and when activity happens ([section 5.3](#53-what-the-server-can-therefore-infer)). Closing that is a v2 goal.
+- **Metadata-hiding.** Sealed-sender-style protection that would blind the server to the social graph and to timing. In v1 the server can infer who is in which Clicks together and when activity happens ([section 5.3](#53-what-the-server-can-therefore-infer)), and — once streaming is live — which persons co-appear in a shared photo, by opaque id ([section 11.9](#119-metadata-leak-co-appearance-by-id)). Closing all of that is a v2 goal; the same work that blinds the server to the membership graph also blinds it to streaming co-appearance.
 - **Premises-encryption.** Hiding premises locations from the server. In v1 the geofence polygons are server-stored so they can sync to devices, so the server knows roughly where a Click operates ([section 5.5](#55-two-decisions-recorded-here)). This is deferred to v2 alongside the rest of metadata-hiding.
 
 **Empirical calibration (closed beta)**
@@ -882,4 +979,5 @@ These are the things we have deliberately deferred or not yet pinned down. We li
 - **Atomic make-live for enrolment.** Folding the three make-live steps of an enrolment write — the group-key content wrap, the opt-in, and its approval — into a single atomic operation, so a person can never be momentarily in the roster without its key ([section 4.9](#49-the-enrolment-write-is-idempotent-and-resumable-the-client-owns-the-person-id)). Today the write is resumable on retry but not atomic across those three steps.
 - **Version-atomic model-upgrade re-embed.** Tagging a model-upgrade re-embed ([section 4.5](#45-re-enrolment-periodic-and-explicit-age-banded-no-silent-learning), [section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)) with the model version so a person can never be left half on the old model and half on the new across an interrupted re-embed.
 - **Duplicate-child resolution mechanics.** The model rule is fixed in [section 6.7](#67-one-canonical-child-enrolment-per-click-co-guardianship-not-duplication) — one canonical enrolment per Click, a second guardian co-guardians it via the two-sided grant, the in-Click duplicate check leaks nothing across the boundary. The build-time details are open: the operating threshold for the on-device duplicate check, the admin reconciliation/merge tool for institutional Clicks, and whether a confirmed-same second biometric is discarded or folded in as additional templates of the one record.
+- **Streaming develop-to-fix cool-off duration.** The develop/fix recall window is fixed in shape ([section 11.8](#118-the-developing-state-and-its-honest-limit)) — view-only while developing, downloadable once fixed, recall total while developing and forward-only after — but the exact cool-off duration before a blob fixes is a build-time detail not yet pinned.
 - **The spec's canonical format.** Whether this stays GitHub-rendered markdown, becomes a Signal-style PDF, or takes an RFC shape. For now, the canonical form is this markdown document.
