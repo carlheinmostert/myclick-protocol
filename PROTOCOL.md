@@ -66,7 +66,7 @@ These are the adversaries the architecture exists to beat. If any of these wins,
 These are the attacks we do not stop. We list them because pretending otherwise would be dishonest, and because knowing them lets a user decide what myClick is and is not good for.
 
 - **A compromised device.** If the user's own iPhone is jailbroken, or running malware with sufficient privilege, the plaintext embeddings that are decrypted on-device for matching are exposed on that device. No end-to-end encrypted system can defend a compromised endpoint — the endpoint is where plaintext has to exist for the app to work at all. We protect data in transit and at rest, not against an attacker who already owns the phone.
-- **The lock-screen camera, to whoever holds the phone.** Like Apple Camera, myClick's camera is reachable from the lock screen without a Face ID prompt (see [section 7.5](#75-lock-screen-camera-flow)). Someone who picks up the phone can therefore take obscured photos, and if the owner's family happens to be in front of the lens they will be recognised and kept visible. That is the limit of it: the holder cannot browse Clicks, read a roster, change settings, or open the audit log — those stay behind the app-lock — and the decrypted roster is zeroed the instant the app backgrounds. We accept this narrow surface deliberately, as the price of a grab-and-shoot camera; it exposes nothing the holder could not already capture by standing where they are.
+- **The lock-screen camera, to whoever holds the phone.** Like Apple Camera, myClick's camera is reachable from the lock screen without a Face ID prompt (see [section 7.6](#76-lock-screen-camera-flow)). Someone who picks up the phone can therefore take obscured photos, and if the owner's family happens to be in front of the lens they will be recognised and kept visible. That is the limit of it: the holder cannot browse Clicks, read a roster, change settings, or open the audit log — those stay behind the app-lock — and the decrypted roster is zeroed the instant the app backgrounds. We accept this narrow surface deliberately, as the price of a grab-and-shoot camera; it exposes nothing the holder could not already capture by standing where they are.
 - **Apple itself.** We rely on the Secure Enclave for key generation and on iCloud Keychain for escrow and recovery. If Apple is malicious, or is compromised at the hardware or operating-system level, the model breaks. We trust the platform — as does every iOS app, and as the user already does by carrying the device.
 - **Authorised use.** A photographer with `can_capture` rights in a Click legitimately recognises the consented children of that Click. That is the product working as designed, not a breach. The crucial nuance, stated explicitly: **within a Click, members necessarily share the embeddings of opted-in children.** A photographer's device must hold the plaintext embeddings of the children they are allowed to recognise, or matching cannot happen at all. A determined malicious member could therefore extract those vectors from their own device. The protection here is not secrecy — it is **consent** (they were granted recognition rights to exactly these children, by those children's parents) plus **non-reversibility** (an embedding is a vector, not a photo; it cannot be turned back into an image of the child). If you grant someone the right to recognise your child, you are trusting them with that child's embedding. The protocol makes that trust explicit and scoped; it does not pretend to remove it.
 - **Metadata.** The server cannot read embeddings, but it can see some metadata: who is a member of which Click, when embeddings are uploaded, and the shape of the Click membership graph. Content is encrypted; the social graph and timing are visible server-side. Full metadata-hiding — sealed-sender-style techniques that blind the server to who talks to whom — is a v2-and-later consideration, not a v1.0 promise.
@@ -524,7 +524,21 @@ The active roster is stored as ciphertext (that is the whole point of [sections 
 
 No plaintext roster is ever written to disk. Only the **encrypted** roster is cached on disk for fast loading; decryption is always in-memory and per-session. This is what keeps the encrypted-at-rest guarantee true for consented children, not only for strangers — your own child's embedding is no more exposed at rest than anyone else's.
 
-### 7.4 What an active recognition session is
+### 7.4 Roster key-wrapping — Secure-Enclave self-ECDH
+
+[Section 7.3](#73-roster-decryption-lifecycle-r1) fixes that only the *encrypted* roster is cached on disk. This subsection fixes the key that encrypts it, and the device-bound key that wraps *that* key. The biometric embeddings in the roster are the most sensitive bytes the device caches at rest, so the at-rest key is hardware-bound to the one phone that owns the roster.
+
+- **The roster cache is sealed under a random roster key.** The on-disk encrypted roster is AES-256-GCM under a random 256-bit **roster key** generated on the device. Decryption is in-memory and per-session, exactly as section 7.3 requires; the roster key is the symmetric key that AES-GCM uses.
+- **On Secure-Enclave hardware the roster key is itself wrapped.** The roster key is not stored bare. It is wrapped (AES-256-GCM) under a **wrapping key** that is derived from a non-extractable Secure-Enclave P-256 key — the same key-wrapping (envelope) idea that the whole document is built on (section 3), applied one layer further down, to the local at-rest cache rather than to the escrowed hierarchy.
+- **The wrapping key is derived by self-ECDH.** The Secure-Enclave private key performs an ECDH key-agreement **with its own public key**, and the shared secret is run through HKDF-SHA256 — salt `camera.myclick.roster-key-wrap`, 32-byte output — to produce the AES-GCM wrapping key. The derivation is deterministic: the same Enclave key always yields the same wrapping key, so the roster key can be unwrapped on every launch without storing the wrapping key anywhere.
+- **Why self-ECDH, not direct encryption.** CryptoKit's Secure-Enclave API exposes only key-agreement and signing — there is no direct symmetric-encryption primitive that takes an Enclave key. Self-ECDH followed by HKDF is the accepted way to derive a deterministic symmetric wrapping key from a non-extractable Enclave key: it uses only the two operations the Enclave offers, and it never asks the Enclave to do anything outside its hardware contract.
+- **Why this is sound, not a weakness.** The Enclave private scalar never leaves the chip — that is the whole point of the Secure Enclave (section 3). Because the scalar is the only secret input to the agreement, the wrapping key can be reproduced *only* by this exact device's Enclave; no other device, and no software on this device, can derive it. HKDF with the domain-separated salt turns the raw ECDH shared secret into a proper pseudorandom 256-bit key bound to this purpose. The "self" in self-ECDH is not a degenerate handshake — it is a deterministic way to make the hardware mint a per-device symmetric key.
+- **Persistence.** The wrap material is a single Keychain item with accessibility `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`: it is available only while the device is unlocked, and it is **excluded from iCloud and iTunes/Finder backup**, so it never leaves the phone by any backup or sync path. The stored blob is `[Secure-Enclave key dataRepresentation][AES-GCM-wrapped roster key]` — the device-bound key's own serialised form concatenated with the roster key sealed under the wrapping key derived from it. On launch the Enclave reconstitutes its key from the `dataRepresentation`, re-derives the wrapping key by self-ECDH, and unwraps the roster key into memory.
+- **Fallback where no Secure Enclave exists.** On a platform without a Secure Enclave — the simulator, or older hardware below the supported floor — there is no non-extractable key to wrap with, so the roster key is stored **bare** behind the *same* `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` Keychain accessibility. This is an explicit branch, not a silent degrade: the device-only, no-backup at-rest posture is identical; only the extra hardware-bound wrap is absent, because the hardware to provide it is absent.
+
+This decision — to keep the self-ECDH scheme rather than reach for any other construction to key the at-rest roster cache — is recorded as ADR-0013 in the myClick working repo.
+
+### 7.5 What an active recognition session is
 
 A recognition session is precisely the period during which the device holds a decrypted roster in memory. Its boundaries are defined exactly, because the roster's lifetime is a security property.
 
@@ -536,13 +550,13 @@ A recognition session is precisely the period during which the device holds a de
 - **Soft boundary (foreground only):** if the user briefly navigates away from the camera while the app is still foregrounded and unlocked, the roster is held for roughly 60 seconds — so flipping quickly back to the camera does not pay the decryption cost again — and then zeroed. Any background or lock during that window zeroes it immediately. The soft boundary never survives leaving the app.
 - **Recomposes within a session:** in Mode A, as the device crosses premises boundaries, Clicks drop out of the in-memory roster (their portion zeroed) or join it (their portion decrypted). The session persists; its roster contents track the active scope.
 
-### 7.5 Lock-screen camera flow
+### 7.6 Lock-screen camera flow
 
 The camera and recognition are reachable from the lock screen **without** a Face ID prompt, the way Apple Camera is. The Face ID app-lock gates only the management surfaces — the Clicks list, settings, the licence inventory, the audit log — never the camera.
 
 The security reasoning follows directly from the threat model. We already concede the stolen or compromised device ([section 1.2](#12-what-we-concede-accepted-risks-stated-plainly)). The camera only ever obscures faces; it never exposes the roster, the embeddings, or the social graph to whoever is holding the phone. So a thief who grabs the phone gets a camera that will recognise the owner's family if those people happen to be physically standing in front of it — and nothing else. They cannot browse Clicks, see who is enrolled, read settings, or open the audit log. The decrypted roster is still zeroed the instant the app backgrounds or locks; it is simply re-decrypted on each quick launch. We trade nothing of value for the convenience of a grab-and-shoot camera.
 
-### 7.6 Progressive roster loading
+### 7.7 Progressive roster loading
 
 Rosters load smallest-and-likeliest first. The family Click — a handful of people — decrypts in single-digit milliseconds; most-recently-used Clicks come next; large rosters fill in over tens of milliseconds. Crucially, this decryption overlaps camera-hardware initialisation, which takes roughly 200–400 ms on every launch regardless, so the roster work is hidden behind a wait that was happening anyway and is invisible to the user.
 
@@ -553,11 +567,11 @@ Combined with two other rules, the quick grab from the lock screen feels instant
 
 The only observable artifact is benign: a school-opted-in child who is not part of the owner's family might be briefly over-obscured — for the tens of milliseconds until the school roster finishes loading — and over-obscuring is always the safe direction to fail.
 
-### 7.7 Matching performance (R3)
+### 7.8 Matching performance (R3)
 
 Matching is brute-force vectorised cosine similarity: one face's embedding is compared against the whole roster matrix in a single operation, using Accelerate/BNNS. This is more than fast enough for v1 scale, which runs to thousands of templates. Approximate-nearest-neighbour indexing is deferred until a single roster exceeds roughly 10,000 templates — a threshold a v1 Click does not reach.
 
-### 7.8 Mode B
+### 7.9 Mode B
 
 Mode B uses the same recognition engine described above, with one difference: the roster is the **explicitly-selected Click's** roster rather than the capture-by-union of active Clicks. The user chooses the Click context at import time (because imported photos were not taken under any photographer's identity in myClick), and from there detection, extraction, comparison, decision, and zeroing are identical.
 
@@ -605,7 +619,7 @@ This covers normal photo capture, normal video recording, and Mode B import:
 
 - **Photo.** The frame is obscured in memory; only the obscured image is written to the Photos library.
 - **Video.** Frames are obscured one by one as they arrive; `AVAssetWriter` streams the *obscured* movie to disk as it records. The obscured movie is the output we keep — but no unobscured frame is ever written.
-- **Mode B import.** The imported file is decoded in-process; frames are obscured in memory and the obscured export is written. The imported original is never copied into myClick's storage. (Mode B's recognition behaviour is in [section 7.8](#78-mode-b).)
+- **Mode B import.** The imported file is decoded in-process; frames are obscured in memory and the obscured export is written. The imported original is never copied into myClick's storage. (Mode B's recognition behaviour is in [section 7.9](#79-mode-b).)
 
 For Flow A the "originals never touch disk" guarantee holds in its strongest form: the source original lives and dies in memory. iOS does not page application memory to a disk swap file, so "in memory only" on iPhone genuinely means never written to storage.
 
