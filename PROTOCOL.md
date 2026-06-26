@@ -60,7 +60,7 @@ These are the adversaries the architecture exists to beat. If any of these wins,
 - **A server breach.** An attacker who steals the entire database — every row, every blob, every backup — gets only ciphertext. No plaintext embeddings, ever. There is no admin key, no "break glass" decrypt path, no master secret on the server that turns the stolen data into faces.
 - **A subpoena or state actor.** We cannot hand over what we cannot decrypt. The honest answer to a warrant for a child's biometric is "here is the ciphertext we hold; we have no key for it." This is a deliberate design property, not a legal posture we adopt after the fact — the inability is structural.
 - **A network eavesdropper.** Everything is TLS in transit and end-to-end encrypted at rest. An attacker watching the wire, or sitting on a compromised network path, sees encrypted bytes both in flight and as stored.
-- **A malicious Click member.** A member of one Click cannot extract the embeddings of children in Clicks they are not in — group keys are scoped per Click and never shared across them. No member can obtain face images of anyone else's children: no photo or face image is ever transmitted or stored server-side, and the only stored face image anywhere — the encrypted enrolment-capture sidecar of section 4.8 — exists solely on its owner's device, for that owner's own enrolled people, and never leaves it. And no member can recognise children outside the Click's premises or scope, because recognition is gated by the active scope at capture time.
+- **A malicious Click member.** A member of one Click cannot extract the embeddings of children in Clicks they are not in — group keys are scoped per Click and never shared across them. No member can obtain a decryptable face image of anyone else's children: the only stored face images anywhere are the encrypted enrolment-capture sidecars of section 4.8, each sealed under its owner's content key for that owner's own enrolled people. They are held on the owner's device and mirrored to our server only as ciphertext — a member who is not the owner, and the server itself, holds no key that opens them. And no member can recognise children outside the Click's premises or scope, because recognition is gated by the active scope at capture time.
 
 ### 1.2 What we concede (accepted risks, stated plainly)
 
@@ -376,7 +376,7 @@ flowchart LR
         plain["Plaintext embeddings"]
         vk["The vault key (escrowed with Apple)"]
         ugk["Any group key in unwrapped, usable form"]
-        raw["Any raw photo or face image"]
+        raw["Any decryptable photo or face image"]
     end
     sees -.->|cannot cross| never
 
