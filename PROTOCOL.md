@@ -834,6 +834,26 @@ flowchart TB
 
 **Bounded with a nudge.** Undecided frames past a threshold (an age, and/or a count) raise a gentle prompt to decide on them. The store never silently deletes an undecided frame; the bound exists so the count of unobscured originals at rest does not grow without limit — the same data-minimisation logic the stream lane's TTL serves.
 
+### 8.10 The encrypted on-disk display cache (Stream receive)
+
+The Stream's receive feed decrypts each incoming photo to a display image. Holding those display copies only in memory means a cold relaunch re-fetches every photo from the relay (a signed-URL ciphertext download) and re-recovers the group key to re-decrypt it. The **display cache** is a fourth use of the on-device encrypted store machinery ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)) that persists a **downsampled** display copy of each received photo on disk, encrypted, so a relaunch renders the feed from local ciphertext with no network and no key recovery.
+
+**Same posture as §8.8.** One **display blob** (`<blobid>.display.enc`, a ~1024px JPEG sealed under a fresh per-file content key) and one **sidecar** (`<blobid>.meta.enc`, AES-256-GCM under a device cache store key, holding the wrapped content key, the blob ref, `cachedAt` / `expiresAt` / `lastReadAt`, and a version fingerprint) per entry. Blobs are written `NSFileProtectionComplete`, inside the app container, excluded from backup; the sidecar is the commit marker (blob first, sidecar last, atomic rename). Destruction is the same key-first crypto-shred: delete the sidecar (the only wrapped-key copy) first, then the blob, and verify both are gone — a survivor fails loud, never silently.
+
+**A distinct, droppable device key.** The cache uses its own device store key, held in the Keychain device-only / non-synced / never-escrowed, under a service distinct from the pocket's. The cache is thus independently droppable — wiping it never touches the pocket — and, like every store key, a replaced phone generates a fresh one and starts with an empty cache.
+
+**Differences from §8.8, stated plainly.** (1) **A single load-bearing blob** per entry (the display copy), versus the pocket's original+render. (2) **It persists across launch as a cache: a miss is a normal, non-fatal outcome** — the feed simply re-fetches — whereas a post-commit pocket miss is a defect. (3) **An active TTL/version sweep that deletes.** Where the pocket never deletes an undecided item on its own, the cache deletes: an entry past its expiry, or version-stale, is crypto-shredded on read and on reconcile. (4) **A size cap with LRU eviction.** Application Support is not OS-evicted, so the cache caps itself (a byte/count cap) and evicts the least-recently-used entries — through the same crypto-shred path, never a bare delete. (5) The **primary invalidation is receiver-side**, below.
+
+**Invalidation is receiver-side, against the live listing.** A retract, an expiry, or a withdrawal-supersede is enacted by the *owner* (retract is outbound-only) or the *relay*; a *receiver* learns of it only when the blob stops appearing in `list_stream`. So the cache's **primary retract/expiry path is a reconcile against the freshly-listed live set**: on every feed refresh the device enumerates the cache and crypto-shreds every cached blob that is no longer in the live listing, or is past its stored expiry. This is enumerated cache-vs-live, not a diff of the in-memory feed (which is replaced wholesale and would miss a never-listed-this-session blob).
+
+**Re-blur / version invalidation.** A withdrawal re-blur ([section 11.7](#117-withdrawal-the-server-stops-immediately-the-device-re-blurs-eventually)) mints a **new** `blob_id` and shreds the predecessor ([section 11.9](#119-per-blob-atomicity-and-ordering-compare-and-set)), so a receiver already catches it via the live-list reconcile above — the old id vanishes, the new id is a cache miss. As defence-in-depth against any same-id mutation, the sidecar also stores the blob's per-blob CAS `version`; a read or reconcile whose listed version differs from the cached version crypto-shreds the copy and treats it as a miss, so a stale display of a now-withdrawn child can never be served.
+
+**Orphan-key sweep — fail-soft on a new key.** Because the cache key is never escrowed, a fresh or restored device cannot open last device's sidecars. The launch reconcile treats a sidecar that will not open under the current store key as unrecoverable and deletes both files (it is already unreadable; this only reclaims disk) rather than raising a corruption error — a fresh key means the whole directory is stale and is safely swept, never bricking the feed.
+
+**TTL.** An entry's effective expiry is `min(the relay entry's expires_at, cachedAt + a local cache TTL)`, so a cached copy never outlives either the relay blob's retention window or the local ceiling.
+
+**On-device only.** The cache crosses no device boundary: no server data-flow, no ledger. It is a per-device performance copy of photos the device was already authorized to decrypt and display.
+
 ## 9. Revocation (key rotation; forward-immediate, forward-only)
 
 Revocation is what happens when someone leaves a Click or is removed from it. The honest version of revocation has a sharp limit, and we state it here as plainly as we do everywhere else.
