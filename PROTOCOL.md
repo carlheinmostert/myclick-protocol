@@ -460,6 +460,17 @@ Two consequences recorded honestly. First, the pending-member path assumes — i
 
 **AEAD mode pinned (was an inference in client code).** Every symmetric field-seal named in this section — the self name (vault key), each co-member / inviter name (group key), each person and Click name (content key / group key) — uses **AES-256-GCM**, and the seal-to-identity-public-key path (the pending name) uses **ECIES over P-256** (ephemeral ECDH → HKDF-SHA256 → AES-256-GCM), exactly as fixed in §3 (lines on AEAD mode and asymmetric wrap). This restates, at the name-seal site, the primitive the client implements, so the mode is a PROTOCOL literal here and not left to be re-derived from the code.
 
+### 5.7 The per-account Clicks read returns two server-blind roster counts
+
+The per-account Clicks read (the app-domain `list_my_clicks`) — the read that returns the calling account's Click memberships — additionally returns, **per Click**, two integer counts:
+
+- **(a) The Click's approved opt-in total** — the number of approved opt-in persons recognised by that Click. It is returned to **members** of the Click, who already see that Click on their list.
+- **(b) The caller's own approved opt-in count in that Click** — the number of the calling account's own approved opt-ins in that Click. It is returned to the caller as a **guardian** of those persons.
+
+Both are counts over **opt-in association metadata only** — the `(person_id, click_id)` opt-in associations the server already holds to enforce sharing. They expose **no key material, no ciphertext, no biometric template, and no name**: a count is an integer, not a roster. Counting an association the server already stores introduces **no new server knowledge** — the server can already see that a `(person_id, click_id)` association exists ([section 5.1](#51-what-the-server-holds), membership metadata), so aggregating those existing rows into a count tells it nothing it could not already derive by counting them itself.
+
+This preserves the server-blind posture exactly as the document already permits elsewhere: it is the same class of low-sensitivity, signal-free count as the per-`(person_id, click_id)` distribution-revoked marker and the per-blob ordering scalars the streaming layer already concedes ([section 11.18](#1118-metadata-leaks-and-conceded-trust-boundaries)). The privacy floor is unchanged — the server still holds only ciphertext and metadata it already conceded, and the "what we store" list gains nothing readable.
+
 ## 6. Per-Click group key (the ratchet)
 
 This section consolidates the group-key decisions from [section 3](#3-key-hierarchy) and the sharing-mechanic design into one place. It is the mechanism that lets every current member of a Click recognise the children opted into it, and lets revocation work the moment membership changes.
@@ -473,6 +484,18 @@ Each Click has a single **AES-256 group key**. The embeddings opted into the Cli
 When a new member is admitted, the admin's device wraps the current group key under the new member's identity public key and hands the wrapped key to the server to deliver. Only the new member's Secure Enclave can unwrap it.
 
 This deliberately rides on the admin-approval step that already exists in the join flow. Admission to a Click already requires an admin to approve; wrapping the group key is folded into that same action. The rationale is accountability: a human admin is already in the loop deciding who gets in, so the cryptographic grant of recognition rights happens at exactly the moment a person took responsibility for admitting them — not automatically, not server-side.
+
+#### 6.2.1 Admission confers membership, not the photographer capability
+
+Admission confers **membership only**. A newly admitted account holds the group key — it can decrypt the Click's roster and be recognised within it — but admission does **not**, by itself, confer the **photographer capability**: the right to take recognising photographs under the Click (the `can_capture` member attribute, [section 5.1](#51-what-the-server-holds)). The two are now separated. (An earlier draft implicitly granted the photographer capability to every member of a *symmetric* — peer/family — Click at admission, on the reasoning that all adult members of a family or class cohort capture symmetrically; that **implicit grant is removed**, and this clause supersedes it.)
+
+The photographer capability is acquired through a **two-party handshake**: the member **requests** it (the app-domain `request_capture`), and a Click **admin approves or declines** it (the app-domain `approve_capture` / `decline_capture`). The request is a **durable, declinable state** — it persists until an admin acts on it, exactly as the guardianship request of [section 6.7.1](#671-the-request-direction--when-the-second-guardian-initiates) does — not a fire-and-forget call. This mirrors the existing two-sided shape already used for guardianship and for admission itself: one party initiates, a second party with authority consents, and neither side can complete the grant alone.
+
+The rationale is consent symmetry. A biometric-processing capability must **originate from the data-subject's own affirmative act** — a member is never dropped into a role that processes other people's children's faces without asking for it. The admin still **gates the actual grant**, so the asymmetric-institutional safety property is fully preserved: in a school-style Click, only admin-selected members can ever capture, because a request without an admin approval grants nothing. The change tightens the symmetric case (a request is now required where one was previously implicit) without loosening the asymmetric case.
+
+Acquiring the capability is a **membership-attribute change only** — it flips `can_capture` for one member. It distributes **no key material and triggers no group-key rotation**: the group key was already delivered to this member at admission ([section 6.2](#62-distribution-rides-on-admin-approval)), and the capability grants no new decryption reach (the member could already decrypt the roster they were admitted to). Rotation remains reserved for a member **leaving or being removed** ([section 6.4](#64-rotation-on-every-membership-change)); granting a capability to an existing member is an addition, and additions never rotate.
+
+**Transition.** Photographer capabilities granted under the prior implicit-grant rule are **grandfathered** — left in place, not retroactively revoked. Tightening an already-granted capability (asking a grandfathered photographer to re-request, or withdrawing a capability granted implicitly) is a **separate, deliberate, communicated change**, not a side effect of this rule; this clause changes only how the capability is acquired **from here forward**.
 
 ### 6.3 Content-key indirection
 
