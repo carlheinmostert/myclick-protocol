@@ -677,6 +677,30 @@ Matching is brute-force vectorised cosine similarity: one face's embedding is co
 
 Mode B uses the same recognition engine described above, with one difference: the roster is the **explicitly-selected Click's** roster rather than the capture-by-union of active Clicks. The user chooses the Click context at import time (because imported photos were not taken under any photographer's identity in myClick), and from there detection, extraction, comparison, decision, and zeroing are identical.
 
+### 7.10 The obscuring fill: style vocabulary and per-style anonymity floors
+
+Everything above specifies the *decision* — which faces stay visible and which are obscured. This subsection specifies the *fill*: the pixels rendered where an obscured face was. The fill is a **rendering vocabulary**, not a privacy mechanism in its own right, and the boundary between the two is the whole point of specifying it here.
+
+**The style vocabulary.** An obscured face is rendered in exactly one **obscuring-fill style**, drawn from a fixed vocabulary:
+
+- `gaussian` — the legacy fill. Retired from user selection; the vocabulary retains it so the provenance stamps of photos developed before the style vocabulary existed still resolve to a name.
+- `mosaic-square`, `mosaic-hex`, `mosaic-crystal` — pixel-mosaic variants.
+- `painterly-watercolor`, `painterly-dots` — painterly variants, rendered over a diffuse base.
+- `sticker-<glyph>` — a decorative glyph composited over an anonymity-grade fill, parameterised by the glyph.
+
+**What a style can never change.** A style is texture, never scope. The obscure-or-keep decision ([section 7.1](#71-the-flow)), the mask-shape machinery that bounds the fill, the fail-closed rule ([section 7.7](#77-progressive-roster-loading)) — until the decision is ready, faces are obscured — and the unconsented-face invariant ([section 7.2](#72-the-unconsented-face-invariant-r2)) are all **unchanged by style**. Style rendering consumes the same in-memory-only, zeroed-after-decision embeddings as before; no style creates, requires, or retains any biometric. Switching styles changes what an obscured stranger looks like; it can never change who is obscured.
+
+**Per-style anonymity floors (normative).** Every style must destroy identity; a style that merely decorates is not a style, it is a leak. Each style therefore carries a **floor** that the renderer cannot be configured below, in any setting, at any cascade level:
+
+- **Mosaic (all three variants):** a **fixed block count per face**, not a fixed block size — a face spans approximately 9 blocks across its width regardless of the face's size in pixels. A large face at a fixed block *size* would yield fine-grained pixelation, which is ML-reversible; fixing the *count* makes fine-grained pixelation impossible by construction. Every face reduces to the same coarse grid, whether the blocks are square, hexagonal, or crystal.
+- **Painterly (both variants):** a **minimum smoothing radius / dot radius relative to face size**. The renderer rejects a too-gentle brush; a lightly-stylised recognisable face never leaves it.
+- **Sticker:** the **anonymity-grade fill underneath is the guarantee**; the glyph is decoration above it. The floor applies to the underlying fill, so a sticker asset that fails to composite still leaves an anonymised face — the guarantee never rests on artwork.
+- **Depth-of-field scene treatments:** any treatment that melts a scene into a lens look (however gentle) additionally renders **anonymity-grade obscuring on every stranger head, regardless of the scene blur radius**. A subtle background bokeh never dilutes the anonymisation of a stranger's face.
+
+**Provenance carries the style.** The identity-free in-file provenance stamp ([ADR-0014](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0014-unified-photo-provenance.md) — EXIF `UserComment` + the XMP namespace `https://myclickapp.com/ns/provenance/1.0/`) records its obscuring-mode field as a value from this vocabulary. Because rendering is resolved per destination, **each rendered copy carries the style it was actually rendered in**: the photographer's local developed copy, each streamed per-Click copy ([sections 11.1](#111-two-obscured-versions-on-the-photographers-device) and [11.17](#1117-read-state-lineage-and-provenance-across-a-re-publish)), and each Mode B export stamp their own value independently. This introduces **no new data class and no server involvement**: styles are rendered entirely on-device, the stamp remains identity-free and in-file only, and nothing about a style ever crosses the relay.
+
+The product design behind this vocabulary — the style family, the cascade of defaults, and the per-destination lens review — is specified in the myClick working repo at `docs/superpowers/specs/2026-07-07-obscure-styles-and-destination-lenses-design.md` (2026-07-07). This subsection is the normative protocol residue of that design: the vocabulary, the floors, and the invariants styles cannot touch.
+
 ## 8. Capture and import: source-original lifecycle
 
 The previous sections guarantee that three sensitive artifacts never persist in the clear: the **enrolment sweep frames** ([section 4](#4-enrolment-face-to-encrypted-embedding)) — whose confirmed captures persist only as the encrypted, device-bound sidecar images of [section 4.8](#48-enrolment-capture-sidecars-stored-face-crops), never in the clear — a **stranger's embedding** ([section 7.2](#72-the-unconsented-face-invariant-r2)), and the **decrypted roster** ([section 7.3](#73-roster-decryption-lifecycle-r1)). All three are memory-only or sealed-encrypted by construction and are unaffected by anything in this section.
