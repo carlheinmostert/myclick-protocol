@@ -779,11 +779,11 @@ flowchart LR
     class P plain;
 ```
 
-This covers normal photo capture, normal video recording, and Mode B import:
+This covers still photo capture and Mode B import. Video and Live Photo followed this path in an earlier design; they no longer do — see the supersession note below and [section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously).
 
 - **Photo.** The frame is obscured in memory; only the obscured image is written to the Photos library.
-- **Video.** Frames are obscured one by one as they arrive; `AVAssetWriter` streams the *obscured* movie to disk as it records. The obscured movie is the output we keep — but no unobscured frame is ever written.
-- **Mode B import.** The imported file is decoded in-process; frames are obscured in memory and the obscured export is written. The imported original is never copied into myClick's storage. (Mode B's recognition behaviour is in [section 7.9](#79-mode-b).)
+- **Video and Live Photo (superseded — see [section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously)).** An earlier design obscured video frames one by one as they arrived, streaming an already-obscured movie to disk via `AVAssetWriter`. That real-time, in-flight path is **withdrawn**: obscuring a moving scene frame-accurately while it records imposes thermal load, degrades quality, and contends for compute and memory with the live camera itself. Video and Live Photo now **record natively at full quality into the pocket and are obscured by an asynchronous whole-clip develop pass** ([section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously) onward). Only still photo and Mode B import remain pure Flow A.
+- **Mode B import.** The imported file is decoded in-process; frames are obscured in memory and the obscured export is written. The imported original is never copied into myClick's storage. (Mode B's recognition behaviour is in [section 7.9](#79-mode-b).) A Mode B batch of *videos* follows the asynchronous develop path of [section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously) rather than the in-memory still path.
 
 For Flow A the "originals never touch disk" guarantee holds in its strongest form: the source original lives and dies in memory. iOS does not page application memory to a disk swap file, so "in memory only" on iPhone genuinely means never written to storage.
 
@@ -981,6 +981,136 @@ The push shrinks the lingering window from "next open" toward "seconds" for a ba
 **The Download leak boundary is unchanged.** The pocket sits **inside** the privacy boundary: encrypted, server-revocable, crypto-shreddable. **Download** to Apple Photos remains the explicit, permanent, **out-of-boundary** keep — the forward-only, irretrievable exit from revocation ([section 9.3](#93-forward-only-stated-plainly), [section 11.5](#115-crypto-shred-at-the-ttl-window)). A longer-lived in-boundary pocket must not blur that line: the pocket is revocable; Download is the user's deliberate, permanent choice to step outside revocation. The two stay visibly distinct.
 
 **On-device only.** As with §8.10, the pocket crosses no device boundary for its *content*: no server data-flow of photos, no ledger. The revocation channel adds two genuinely new third-party items — the **per-device APNs token** and the **content-free wake event** — while its sole authoritative flow, the authenticated `fetch_revocations` pull, carries only `blob_id` + `click_id` + `revoked_epoch`, a read-projection of metadata the delivery gate ([section 11.4](#114-the-delivery-gate-server-blind)) already holds (no new server-visible data class), and never a key, face, or name. All of it is declared for the DPIA in [section 11.18](#1118-metadata-leaks-and-conceded-trust-boundaries) alongside the existing streaming metadata.
+
+### 8.12 Develop and publish: two events, and the `developing` state
+
+Sections 8.2–8.9 quietly assumed one thing that is true for a still photo and false for a clip: that obscuring finishes at capture. A photo's obscured render is produced in memory the instant the shutter fires ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)), so by the time the frame reaches the Light Table it is *already safe to show*. A clip cannot work that way — obscuring a whole video well takes far longer than recording it (see [section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously)) — so the single "capture" moment splits into two distinct events, and the spec names them separately from here on:
+
+- **Develop** is the act of producing the **safe render** — reading the source original, detecting and tracking faces, deciding keep-or-obscure, and writing an obscured output. Develop is **entirely on-device and is not a distribution**: nothing leaves the phone, nothing enters the Photos library, no other member sees anything. Developing a clip is exactly as private as holding its encrypted original in the pocket.
+- **Publish** is the act of writing that safe render **out to Apple Photos** (the [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit) switch-off commit). Publish is the **leak boundary**: once a render lands in the Photos library it can sync to iCloud and is beyond myClick's reach or revocation ([section 9.3](#93-forward-only-stated-plainly)). Publish also crypto-shreds the source original.
+
+For a still, develop and publish are *offered* as one gesture but are still two events — the render exists before it is published; the user reviews it, then commits. For a clip they are **separated in time by construction**: develop runs asynchronously in the background and may take many seconds after recording stops, and the user cannot publish a clip that has not finished developing. Keeping the words distinct is load-bearing for the honesty of the model: developing is not a leak, publishing is.
+
+This introduces one new pocket state, ahead of the `undecided` / `stamped` states of [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit):
+
+- **`developing`** — a pocket item that holds an encrypted source original but **does not yet have a safe render**, because the asynchronous develop pass has not produced one. A `developing` item is on the Light Table but cannot be published; it shows a working affordance, not a shareable frame. When develop completes it transitions to `undecided` (a render now exists; the user may keep, discard, or leave it) exactly as a still arrives. A still never occupies `developing` — its render is produced in memory at capture, so it enters the pocket already `undecided`.
+
+### 8.13 Video and Live Photo: record native, develop asynchronously
+
+**One pipeline for both.** A Live Photo is, mechanically, a very short video (a ~1.5 s movie) paired with a still key frame. myClick treats it as **the smallest clip through the same per-frame video-obscuring engine** that handles full-length video: there is one develop pipeline, and Live Photo is its lower bound, not a separate feature. Everything in [sections 8.13–8.19](#813-video-and-live-photo-record-native-develop-asynchronously) applies to both; where a Live Photo differs, it is only in its output shape ([section 8.18](#818-the-live-photo-output)).
+
+**Record native, then develop.** All video and all Live Photo capture **records natively, at full OS quality, straight into the pocket** — there is *no* attempt to obscure frames in flight. The live camera pipeline is left untouched so it keeps the frame rate, stabilisation, HDR, and thermal envelope the OS gives it; the obscuring work happens afterward, asynchronously, over the finished clip. This is the deliberate reversal of the withdrawn real-time path ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)'s supersession note): in-flight obscuring is rejected for its thermal cost, its quality loss on motion, and — decisively — its contention with the live camera for the same compute and memory.
+
+**The seal, precisely.** iOS writes the finished clip as a cleartext file to a URL myClick provides inside a `NSFileProtectionComplete` scratch location — the same encrypted-scratch handoff that hardened Flow B already uses ([section 8.4](#84-the-hardened-flow-b)). The moment iOS signals the recording is finished, myClick **seals that file into the pocket** under its own fresh per-item content key (AES-256, wrapped by the device store key of [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)) and **crypto-shreds the OS handoff scratch file**. From that point the durable original lives as a **pocket-lane** item, not a scratch-lane one — this is the important distinction from ordinary Flow B:
+
+- The **scratch lane** is *empty on launch* ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)); it holds the OS handoff file only for the instant between the OS write and the seal.
+- The **pocket lane** is *kept until decided*; it holds the video's encrypted original from the seal until the user publishes or discards it. A clip's original must survive across launches and across the whole develop-then-review dwell, so it belongs in the pocket, exactly like a still's Light-Table original ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)) — the only difference is that a video pocket item begins life `developing` (no render yet) rather than `undecided`.
+
+Because the durable original is device-store-key-wrapped and that key is **device-only and never escrowed** ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)), the unobscured clip cannot ride a backup or restore off the device — defence in depth beyond `NSFileProtectionComplete` and backup exclusion. A replaced phone starts with no video originals at all.
+
+**An interrupted seal is reconciled on launch.** If the app dies between the OS write and the seal, the launch reconcile ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)) finds a scratch handoff file with no matching pocket sidecar and, because the scratch lane's policy is *reconcile to empty*, it either completes the seal (if the bytes are intact and the item was meant to be kept) or crypto-shreds the orphan. The seal itself is sidecar-last and atomic, so a crash mid-seal leaves either a fully-sealed pocket item or nothing — never a half-open original.
+
+```mermaid
+flowchart TB
+    S["Camera sensor"] --> OS["OS capture pipeline<br/>(full quality, frames not obscured)"]
+    OS --> H["Finished clip written by iOS<br/>to NSFileProtectionComplete scratch"]
+    H --> SEAL["Seal into pocket<br/>(per-item content key)"]
+    SEAL --> SH["crypto-shred the OS handoff scratch"]
+    SH -.-> H
+    SEAL --> POC["Pocket item · state: developing<br/>encrypted original, no render yet"]
+    POC --> DEV["Async develop pass<br/>(section 8.14)"]
+    DEV --> REN["Safe render written · state: undecided"]
+    REN --> LT["Light Table review"]
+    LT -->|publish / switch-off| PUB["Photos library + crypto-shred original"]
+    LT -->|discard| DISC["crypto-shred · gone"]
+
+    classDef mem fill:#eef,stroke:#88a,color:#000;
+    classDef disk fill:#fee,stroke:#a88,color:#000;
+    classDef plain fill:#fff,stroke:#bbb,color:#000;
+    class S mem;
+    class OS,H,SEAL,SH,POC,DEV,REN,DISC disk;
+    class LT,PUB plain;
+```
+
+### 8.14 The develop worker: preemptible, bounded, two streaming passes
+
+Developing a clip is heavy, on-device, neural-engine work that must never compete with the thing the user is actually doing. The develop worker is therefore **low-priority, single-flight, and fully preemptible**, governed by four gates in strict order:
+
+1. **A live capture session always wins.** The worker **hard-suspends** the instant a capture session goes live and does not resume until the session ends. This is the primary rule, and it addresses compute and memory contention, not only heat: the live camera and a develop pass both want the neural engine and large pixel buffers at once, and the live camera is what the user is watching. A suspended pass resumes from its last checkpoint; it never restarts from zero.
+2. **Thermal state.** With no live session, the worker still throttles or suspends under `ProcessInfo` thermal pressure, so a long batch cannot cook the device.
+3. **Charging / idle preference.** The worker prefers to run when the device is charging or idle, and backs off on battery under load — the same posture as any considerate background task.
+4. **Memory pressure.** It yields under memory pressure rather than risk a jetsam kill mid-clip.
+
+**Two bounded streaming passes.** Each clip is developed as **two sequential streaming passes over the frames**, never a whole-clip decode into memory, so peak memory is **flat regardless of clip length** — a ten-second clip and a ten-minute clip have the same footprint:
+
+- **Pass 1 — analyse, track, decide.** Stream the frames once to detect faces, build **person-tracks** across time, match each track against the roster, and decide one keep-or-obscure verdict per track ([section 8.15](#815-per-track-decisions-across-the-whole-clip)). This pass writes only a compact per-track decision map, not pixels.
+- **Pass 2 — render.** Stream the frames a second time, applying each track's decision to every frame it appears in, and write the obscured output clip (and, for a Live Photo, its paired still — [section 8.18](#818-the-live-photo-output)).
+
+Both passes are checkpointed at frame boundaries so preemption at any of the four gates above costs at most the current frame. The source original is decrypted **only** into the working buffers of the current frame window, and those buffers are zeroed as the window advances; at no point does a whole cleartext clip exist in memory or on disk.
+
+### 8.15 Per-track decisions across the whole clip
+
+Keep-or-obscure is decided **per person-track across the whole clip, not per frame.** Pass 1 builds a track for each person by following the body with person-instance segmentation ([section 7.13](#713-obscure-region-is-context-dependent-whole-body-under-a-softened-render) already establishes that the obscure region is traced from the face along the body), matches the track against the roster, and produces **one verdict for that person that is then applied to every frame the track appears in.** A person recognised in the clip stays clear for the whole clip; a stranger is obscured for the whole clip. This avoids the flicker of a per-frame decision (a face that is recognised on one frame and missed on the next) and is only affordable because the pass is asynchronous over the entire clip rather than racing the shutter.
+
+The decision is **fail-closed**, exactly as the live path is:
+
+- A track is **kept clear only if it is confidently recognised.** Anything short of that is obscured.
+- An **ambiguous** track — low match confidence, or **tracker identity ambiguity where two tracks cross and the tracker cannot be sure which person continued which track** — is obscured **provisionally** for the frames in question, never revealed on a guess.
+- Once identity **re-establishes** (the track separates cleanly again, or a later high-confidence match resolves who the track belonged to), the decision is **backtrack-corrected**: the render for the affected frames is recomputed with the now-known verdict. Because both passes are whole-clip and checkpointed ([section 8.14](#814-the-develop-worker-preemptible-bounded-two-streaming-passes)), a track's identity resolved late in the clip can correct frames early in the clip before anything is published.
+- A track that is **never** resolved to a confident recognition stays obscured for the entire span it is present. Coverage never shrinks below the face obscure, and under a softened render it is whole-body per [section 7.13](#713-obscure-region-is-context-dependent-whole-body-under-a-softened-render).
+
+Provisional-obscure-then-backtrack is the video analogue of the live path's "obscure first, decide after": nothing is ever revealed before identity is certain, and the whole-clip pass is what lets a late certainty repair an early frame.
+
+### 8.16 Roster re-evaluation at develop and at publish
+
+A pocket item — still or clip — may sit undeveloped or undecided across launches, days, and membership changes. Two things must therefore be pinned down: what **context** the item was recorded under, and what **roster** applies to it now.
+
+- **Context is frozen at record time.** Which Clicks apply to a capture is fixed when it is recorded — the photographer's active `can_capture` Clicks filtered by premises (Mode A), or the Click chosen at import (Mode B). This set is written into the pocket item's sidecar and **never re-derived later**; a membership the photographer gains or loses afterward does not change which Clicks a past capture belongs to.
+- **Roster is evaluated fresh at develop and at publish.** Who is *currently* enrolled in that frozen set of Clicks is resolved anew each time the item is developed and again when it is published. **Revocation obscures; addition reveals**: a child removed from a Click between record and publish is obscured in the published render even though they were recognised when the clip was shot, and a child added to the Click becomes recognised in a re-developed render even though they were a stranger at capture. Recognition is **recomputed from the retained encrypted original each time** — consistent with the unconsented-face invariant ([section 7.2](#72-the-unconsented-face-invariant-r2)): no persistent per-face biometric is kept for the clip's subjects; the match is redone from the original against the current roster and the in-memory embeddings are zeroed after.
+
+**Publish is a hard gate.** myClick never writes a render to the Photos library without **re-checking the item's frozen record-time Click set against the current roster at the moment of publish.** This is non-negotiable and applies to every pocket item, photo and video alike: the leak boundary ([section 8.12](#812-develop-and-publish-two-events-and-the-developing-state)) may only be crossed with a render that reflects consent *as it stands now*, not as it stood at capture or at an earlier develop.
+
+**A roster-version stamp avoids needless re-develop.** Each develop records the **roster version** (a monotone per-Click stamp that advances on every membership change) it was computed against. At publish, if the current roster version for every contributing Click still matches the stamp on the cached render, the render already reflects the current roster and is published as-is; if any has advanced, the item is **re-developed before publish** so revocations obscure and additions reveal. Re-develop is thus skipped exactly when it would change nothing, and forced exactly when consent has moved.
+
+```mermaid
+flowchart TB
+    P["Publish requested for a pocket item"] --> C{"current roster version ==<br/>render's roster-version stamp?<br/>(per contributing Click)"}
+    C -->|all match| W["publish cached render → Photos<br/>+ crypto-shred original"]
+    C -->|any advanced| RD["re-develop against current roster<br/>(revocation obscures, addition reveals)"]
+    RD --> W
+
+    classDef plain fill:#fff,stroke:#bbb,color:#000;
+    classDef disk fill:#fee,stroke:#a88,color:#000;
+    class P,W plain;
+    class C,RD disk;
+```
+
+### 8.17 Retention, re-develop, and the publish-or-discard shred
+
+The encrypted original is retained for the item's whole **Light-Table dwell** — the existing pocket-lane rule ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal), [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)). It is kept, not an obscured-only copy, precisely so the item can be **re-developed**: a manual face-fix, a roster change ([section 8.16](#816-roster-re-evaluation-at-develop-and-at-publish)), or an undo all recompute the render from the retained original and update the cached render, then zero the working buffers again.
+
+**Re-develop and undo are pre-publish only.** They are freely available for as long as the item sits in the pocket. The moment the item is **published** (the switch-off commit of [section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)) the original is **crypto-shredded** and the safe render enters Apple Photos — and from there it can sync to iCloud. That step is **irreversible**: there is no original left to re-develop, and the published render is outside myClick's boundary and beyond revocation ([section 9.3](#93-forward-only-stated-plainly)). A **discard** shreds the original the same way, minus the Photos write. Publish and discard are the only two exits, and both end in a crypto-shred of the source original; the difference is only whether a safe render was written out first.
+
+This is the same publish/discard machinery §8.9 already defines for stills; the clip inherits it unchanged, with the one addition that a clip cannot be published while `developing`.
+
+### 8.18 The Live Photo output
+
+A developed Live Photo is a **real Live Photo**, not a flattened still or a muted video: an **obscured still** paired with an **obscured movie**, re-paired into a single Live Photo via a shared content identifier (`kCGImagePropertyMakerAppleDictionary` asset-identifier / `PHLivePhoto` pairing) so the Photos library treats the output as one live asset that plays on a long-press exactly as a native Live Photo does. Both halves come out of the same develop pass ([section 8.14](#814-the-develop-worker-preemptible-bounded-two-streaming-passes)): the paired movie is developed like any clip, and the still is developed as its key frame.
+
+- **The default key photo is the full-resolution obscured shutter frame** — the high-resolution still iOS captured at the shutter instant, obscured. This preserves the still's native resolution.
+- **A re-picked key frame is movie-resolution.** If the user chooses a different key frame from within the clip (the way Apple's "Make Key Photo" does), that frame comes from the movie track and therefore carries the movie's resolution, not the shutter still's — exact parity with Apple's own behaviour, stated so no one expects a re-picked frame to match the full-res shutter still.
+
+**Audio is not obscured — stated as a limit.** The develop pipeline obscures **faces in the visual track only.** The Live Photo's (and any video's) **audio is passed through unchanged**: a bystander's voice, a name spoken aloud, or other identifying sound in the recording is **not** removed. This is an honest limitation, not an oversight — myClick's guarantee is about faces of unconsented children, and it does not extend to the audio track. The product copy says so plainly rather than implying the clip is fully anonymised.
+
+### 8.19 The residual for video, stated plainly
+
+The core invariant is **unchanged**: **no recoverable cleartext source original ever persists.** For a clip the original lives in the pocket as **ciphertext at rest** — sealed under a per-item content key, wrapped by the device-only, never-escrowed store key, `NSFileProtectionComplete`, excluded from backup ([section 8.13](#813-video-and-live-photo-record-native-develop-asynchronously), [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)). Cleartext exists **only in memory**, and only within the current frame window of a running develop pass on an unlocked device ([section 8.14](#814-the-develop-worker-preemptible-bounded-two-streaming-passes)).
+
+What is **not** claimed for video is the *stronger* Flow A sub-promise — "the original never touches disk." A still's original can live and die in memory ([section 8.2](#82-flow-a--frame-accessible-capture-memory-only)); a clip's cannot, because the OS hands us a finished file and develop takes longer than any single session. So the honest, precise statement for video is:
+
+> The encrypted source original **persists in the pocket, always as ciphertext at rest, from the moment it is sealed at capture until it is obscured-and-decided** — that is, until the item is published (render written, original shredded) or discarded (original shredded). Throughout that dwell it is decryptable only in-process, only while the app is running on an unlocked device, and only frame-window by frame-window during a develop pass. This is exactly the residual already conceded for hardened Flow B ([section 8.5](#85-the-residual-stated-plainly)) and for enrolment and recognition ([section 4](#4-enrolment-face-to-encrypted-embedding), [section 7](#7-recognition-on-device-matching)) — plaintext must exist in memory for the app to do its work — and it falls entirely inside the compromised-device concession of [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly). Video does not widen the concession; it declines the *stronger* disk-avoidance promise that only frame-accessible stills can keep, while meeting the universal invariant in full.
+
+The difference between a video and a Flow A still is therefore precisely one line: the still never has to touch disk to be made safe; the clip is held as ciphertext on disk while an asynchronous pass makes it safe. Both end at the same invariant — nothing readable as a child's face ever survives.
 
 ## 9. Revocation (key rotation; forward-immediate, forward-only)
 
