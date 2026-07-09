@@ -1055,10 +1055,21 @@ Rendering a clip is heavy, on-device, neural-engine work that must never compete
 3. **Charging / idle preference.** The worker prefers to run when the device is charging or idle, and backs off on battery under load — the same posture as any considerate background task.
 4. **Memory pressure.** It yields under memory pressure rather than risk a jetsam kill mid-clip.
 
+**Concrete gate thresholds (normative — fail loud, never silent degrade).** The worker may **start or continue** a clip only when every gate below is clear. A blocked gate **defers** the queued clip (item stays `.rendering`; original stays sealed); it does **not** skip obscuring, invent a partial render, or develop an unfinished movie. Evaluation order matches the four gates above:
+
+| Gate | Clear (may run) | Blocked (must defer) | Signal |
+|---|---|---|---|
+| 1. Capture live | No in-progress video recording (and, when wired, no live capture session) | Recording / live capture session | App-owned flag; hard-suspend |
+| 2. Thermal | `ProcessInfo.thermalState` is `.nominal` or `.fair` | `.serious` or `.critical` | `ProcessInfo.thermalStateDidChangeNotification` |
+| 3. Charging / idle | Device is charging or full, **or** Low Power Mode is off | Low Power Mode **on** while on battery (not charging / not full) | `ProcessInfo.isLowPowerModeEnabled` + `UIDevice.batteryState` |
+| 4. Memory | No sticky memory-pressure flag, and `os_proc_available_memory()` ≥ 80 MiB (when the API reports a value) | `UIApplication.didReceiveMemoryWarningNotification` (sticky until headroom recovers), or available memory below 80 MiB | Memory warning + `os_proc_available_memory()` |
+
+Between clips the worker re-checks before dequeuing the next item. Mid-clip, it re-checks at frame boundaries; if a gate blocks, the in-flight pass **stops**, the item remains `.rendering`, and the id is re-queued at the front. Full frame-checkpoint resume (continue from the last completed frame without re-analysing from zero) is required by the preemptible contract above and is an implementation obligation — until that checkpoint lands, a mid-clip defer **restarts** the two passes from the beginning of that clip (still fail-closed; never a partial develop).
+
 **Two bounded streaming passes.** Each clip is rendered as **two sequential streaming passes over the frames**, never a whole-clip decode into memory, so peak memory is **flat regardless of clip length** — a ten-second clip and a ten-minute clip have the same footprint:
 
 - **Pass 1 — analyse, track, decide.** Stream the frames once to detect faces, build **person-tracks** across time, match each track against the roster, and decide one keep-or-obscure verdict per track ([section 8.15](#815-per-track-decisions-across-the-whole-clip)). This pass writes only a compact per-track decision map, not pixels.
-- **Pass 2 — render.** Stream the frames a second time, applying each track's decision to every frame it appears in, and write the obscured output clip (and, for a Live Photo, its paired still — [section 8.18](#818-the-live-photo-output)).
+- **Pass 2 — render.** Stream the frames a second time, applying each track's decision to every frame it appears in, and write the obscured output clip (and, for a Live Photo, its paired still — [section 8.18](#818-the-live-photo-output)). If the sealed original carries an audio track, Pass 2 **copies that audio into the obscured render without modification** ([section 8.18](#818-the-live-photo-output)); only the visual track is rewritten.
 
 Both passes are checkpointed at frame boundaries so preemption at any of the four gates above costs at most the current frame. The source original is decrypted **only** into the working buffers of the current frame window, and those buffers are zeroed as the window advances; at no point does a whole cleartext clip exist in memory or on disk.
 
@@ -1116,6 +1127,8 @@ A Live Photo written out by myClick is a **real Live Photo**, not a flattened st
 
 **Audio is not obscured — stated as a limit.** The render pipeline obscures **faces in the visual track only.** The Live Photo's (and any video's) **audio is passed through unchanged**: a bystander's voice, a name spoken aloud, or other identifying sound in the recording is **not** removed. This is an honest limitation, not an oversight — myClick's guarantee is about faces of unconsented children, and it does not extend to the audio track. The product copy says so plainly rather than implying the clip is fully anonymised.
 
+**When audio is present in the sealed original.** Mode A video records a microphone track into the sealed pocket original **only when the photographer has the mic switched on** (the mute default records video with no audio track, so other apps' audio can keep playing while the camera is open). Pass 2 of the render worker ([section 8.14](#814-the-render-worker-preemptible-bounded-two-streaming-passes)) **remuxes that audio track into the obscured render unchanged** — it never analyses, strips, or rewrites samples. A muted capture produces a silent render; a mic-on capture produces an obscured picture with the original sound.
+
 ### 8.19 The residual for video, stated plainly
 
 The core invariant is **unchanged**: **no recoverable cleartext source original ever persists.** For a clip the original lives in the pocket as **ciphertext at rest** — sealed under a per-item content key, wrapped by the device-only, never-escrowed store key, `NSFileProtectionComplete`, excluded from backup ([section 8.13](#813-video-and-live-photo-record-native-render-asynchronously), [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)). Cleartext exists **only in memory**, and only within the current frame window of a running render pass on an unlocked device ([section 8.14](#814-the-render-worker-preemptible-bounded-two-streaming-passes)).
@@ -1125,6 +1138,22 @@ What is **not** claimed for video is the *stronger* Flow A sub-promise — "the 
 > The encrypted source original **persists in the pocket, always as ciphertext at rest, from the moment it is sealed at capture until it is obscured-and-decided** — that is, until the item is developed to Photos (render written, original shredded) or discarded (original shredded). Throughout that dwell it is decryptable only in-process, only while the app is running on an unlocked device, and only frame-window by frame-window during a render pass. This is exactly the residual already conceded for hardened Flow B ([section 8.5](#85-the-residual-stated-plainly)) and for enrolment and recognition ([section 4](#4-enrolment-face-to-encrypted-embedding), [section 7](#7-recognition-on-device-matching)) — plaintext must exist in memory for the app to do its work — and it falls entirely inside the compromised-device concession of [section 1.2](#12-what-we-concede-accepted-risks-stated-plainly). Video does not widen the concession; it declines the *stronger* disk-avoidance promise that only frame-accessible stills can keep, while meeting the universal invariant in full.
 
 The difference between a video and a Flow A still is therefore precisely one line: the still never has to touch disk to be made safe; the clip is held as ciphertext on disk while an asynchronous pass makes it safe. Both end at the same invariant — nothing readable as a child's face ever survives.
+
+### 8.20 Developed video provenance (same stamp, QuickTime containers)
+
+**Every developed video** (and the movie half of a developed Live Photo) carries the **same** identity-free provenance stamp as a developed still — [ADR-0014](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0014-unified-photo-provenance.md): schema-version-first JSON token with `mode`, `style`, opaque Click UUIDs, kept/obscured counts (recomputed at develop from the sealed face set), develop timestamp, and app version. No names, no biometric, no location. No schema bump for video; the token is identical.
+
+JPEG EXIF `UserComment` + XMP do not apply to QuickTime movies. The bake-before-Photos rule is restated for the movie path:
+
+- **One shared develop seam.** The pocket store assembles the stamp from the sealed record and hands it to the video develop writer **before** `PHAssetCreationRequest` sees the file. Photos only writes the local DB (lost on export), so the stamp must live in the movie's own bytes.
+- **Two redundant QuickTime containers, one token in both:**
+  1. **Primary — QuickTime Metadata (`mdta`)** under the key `https://myclickapp.com/ns/provenance/1.0/provenance` (the stills XMP namespace URI + property — the no-migration home for a future signature). UTF-8 string = the JSON token.
+  2. **Fallback — QuickTime User Data `XMP_` atom** carrying a minimal XMP packet with `myclick:provenance` under `https://myclickapp.com/ns/provenance/1.0/`.
+- **Metadata-only remux.** Passthrough remux of the already-obscured render movie — **no pixel re-encode**. A stamp embed failure falls back to the unstamped obscured movie (fail-open on the stamp, never on obscuring).
+- **Reader.** Tries QuickTime Metadata first, then the `XMP_` packet. Absent stamp = "no stamp found", never "tampered".
+- **No new server data-flow.** On-device only; the token never crosses the relay.
+
+Survival limits mirror stills and are stated honestly in the report UX: the stamp survives when movie metadata is kept (Export Unmodified, Files, email, Dropbox, AirDrop with All Photos Data); social platforms and many remuxers strip it.
 
 ## 9. Revocation (key rotation; forward-immediate, forward-only)
 
