@@ -1060,9 +1060,11 @@ Rendering a clip is heavy, on-device, neural-engine work that must never compete
 | Gate | Clear (may run) | Blocked (must defer) | Signal |
 |---|---|---|---|
 | 1. Capture live | No in-progress video recording (and, when wired, no live capture session) | Recording / live capture session | App-owned flag; hard-suspend |
-| 2. Thermal | `ProcessInfo.thermalState` is `.nominal` or `.fair` | `.serious` or `.critical` | `ProcessInfo.thermalStateDidChangeNotification` |
+| 2. Thermal | `ProcessInfo.thermalState` is `.nominal`, `.fair`, or `.serious` | `.critical` only | `ProcessInfo.thermalStateDidChangeNotification` |
 | 3. Charging / idle | Device is charging or full, **or** Low Power Mode is off | Low Power Mode **on** while on battery (not charging / not full) | `ProcessInfo.isLowPowerModeEnabled` + `UIDevice.batteryState` |
 | 4. Memory | No sticky memory-pressure flag, and `os_proc_available_memory()` ≥ 80 MiB (when the API reports a value) | `UIApplication.didReceiveMemoryWarningNotification` (sticky until headroom recovers), or available memory below 80 MiB | Memory warning + `os_proc_available_memory()` |
+
+**Thermal gate rationale (`.serious` may run).** On modern iPhones, `ProcessInfo.thermalState == .serious` commonly sticks for minutes after a short camera session even when the device is not meaningfully hot to the user. Hard-deferring every clip at `.serious` stranded brand-new short videos behind a permanent "Waiting… phone is warm" strip. The normative hard thermal block is therefore **`.critical` only** — the OS's "actively thermal-throttling" band. Capture-live (gate 1) remains the primary contention rule; memory and LPM gates still apply. A mid-clip escalate to `.critical` still defers and re-queues (fail-closed; never a partial develop).
 
 Between clips the worker re-checks before dequeuing the next item. Mid-clip, it re-checks at frame boundaries; if a gate blocks, the in-flight pass **stops**, the item remains `.rendering`, and the id is re-queued at the front. Full frame-checkpoint resume (continue from the last completed frame without re-analysing from zero) is required by the preemptible contract above and is an implementation obligation — until that checkpoint lands, a mid-clip defer **restarts** the two passes from the beginning of that clip (still fail-closed; never a partial develop).
 
