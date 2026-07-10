@@ -608,7 +608,7 @@ Recognition is the moment the product earns its name: faces are detected, matche
 
 1. **Detect.** Vision detects faces in the frame and returns their bounding boxes.
 2. **Extract.** MobileFaceNet extracts an embedding for each detected face, in memory.
-3. **Compare.** The device compares each face's embedding against the **active roster** — the union of the photographer's `can_capture` Clicks that are active at the current location in Mode A, or the explicitly-selected Click's roster in Mode B.
+3. **Compare.** The device compares each face's embedding against the **active roster** — the union of the signed-in photographer's accepted `can_capture` Clicks whose premises are active at the current location, plus every unrestricted Click for which that grant is accepted. Mode A keeps this union live while the camera session moves; Mode B resolves and freezes it when the import batch starts.
 4. **Decide.** A face stays visible if it clears the threshold against **any one** of a person's templates; no match obscures it. The bar is **variant-aware**: an eyes-occluded template (sunglasses) is held to a **stricter** threshold than a bare or reading-glasses one. An occluded face carries far less of the discriminative signal — the eye region — so a sunglasses template is the one most likely to false-accept a stranger ([section 4.4](#44-the-false-accept-asymmetry)); the stricter bar is how we let someone be recognised in sunglasses without spending the false-accept budget. The tier only ever **raises** the bar for occluded templates and never lowers any bar, so bare and reading-glasses matching is unchanged. The occluded threshold is calibrated on the bench against real faces.
 5. **Zero.** Every detected face's embedding is zeroed the moment its decision is made.
 
@@ -650,7 +650,7 @@ A recognition session is precisely the period during which the device holds a de
   - the app terminates;
   - the camera screen closes, or the Mode B batch finishes or is cancelled.
 - **Soft boundary (foreground only):** if the user briefly navigates away from the camera while the app is still foregrounded and unlocked, the roster is held for roughly 60 seconds — so flipping quickly back to the camera does not pay the decryption cost again — and then zeroed. Any background or lock during that window zeroes it immediately. The soft boundary never survives leaving the app.
-- **Recomposes within a session:** in Mode A, as the device crosses premises boundaries, Clicks drop out of the in-memory roster (their portion zeroed) or join it (their portion decrypted). The session persists; its roster contents track the active scope.
+- **Recomposes within a session — Mode A only:** as the device crosses premises boundaries, Clicks drop out of the in-memory roster (their portion zeroed) or join it (their portion decrypted). The session persists; its roster contents track the active scope. A Mode B batch does not recompose after it starts: its union is a batch snapshot under [section 7.9](#79-mode-b).
 
 ### 7.6 Lock-screen camera flow
 
@@ -675,7 +675,9 @@ Matching is brute-force vectorised cosine similarity: one face's embedding is co
 
 ### 7.9 Mode B
 
-Mode B uses the same recognition engine described above, with one difference: the roster is the **explicitly-selected Click's** roster rather than the capture-by-union of active Clicks. The user chooses the Click context at import time (because imported photos were not taken under any photographer's identity in myClick), and from there detection, extraction, comparison, decision, and zeroing are identical.
+Mode B uses the same identity-derived, premises-scoped recognition union as Mode A. At the moment an import batch starts, the device resolves the signed-in photographer's Click memberships and includes every Click for which the photographer has **accepted** `can_capture` and either (a) the current location is inside an active premises or (b) the Click is explicitly unrestricted. A proposed but unaccepted capture grant never contributes. There is **no manual Click picker** and no operator-selected roster.
+
+That resolved union is frozen as the batch's recognition-context snapshot. Premises movement, membership changes, or capture-grant changes after batch start do not add or remove Clicks from the batch already in progress; they take effect when the next batch resolves its snapshot. Detection, extraction, comparison, decision, and zeroing are otherwise identical to Mode A. If the device cannot establish a safe premises context or cannot load the required roster snapshot, the batch does not begin; it never silently substitutes a manually chosen or partial context.
 
 ### 7.10 The obscuring fill: style vocabulary and per-style anonymity floors
 
