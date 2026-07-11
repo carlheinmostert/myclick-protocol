@@ -29,6 +29,14 @@ This protocol is being designed in the open. See the commit history for how it e
    - [8.18 The Live Photo output](#818-the-live-photo-output)
    - [8.20 Developed video provenance (same stamp, QuickTime containers)](#820-developed-video-provenance-same-stamp-quicktime-containers)
    - [8.21 Baseline synthetic Live and X11 Apple-style pre-roll](#821-baseline-synthetic-live-and-x11-apple-style-pre-roll)
+     - [8.21.1 X11 capture source and capability gate](#8211-x11-capture-source-and-capability-gate)
+     - [8.21.2 Exact timeline and tolerance](#8212-exact-timeline-and-tolerance)
+     - [8.21.3 Pair custody, encryption, and unlink honesty](#8213-pair-custody-encryption-and-unlink-honesty)
+     - [8.21.4 Durable records](#8214-durable-records)
+     - [8.21.5 Capture, crash, kill, and relaunch state machine](#8215-capture-crash-kill-and-relaunch-state-machine)
+     - [8.21.6 Whole-pair recognition and obscuring](#8216-whole-pair-recognition-and-obscuring)
+     - [8.21.7 Real pairing, provenance, and develop](#8217-real-pairing-provenance-and-develop)
+     - [8.21.8 X11 implementation gates and Stream exclusion](#8218-x11-implementation-gates-and-stream-exclusion)
 9. [Revocation (key rotation; forward-immediate, forward-only)](#9-revocation-key-rotation-forward-immediate-forward-only)
 10. [Key escrow and recovery](#10-key-escrow-and-recovery)
 11. [Streaming relay and distribution](#11-streaming-relay-and-distribution)
@@ -1125,7 +1133,7 @@ The push shrinks the lingering window from "next open" toward "seconds" for a ba
 
 **On-device replica, server-backed ciphertext.** The pocket adds no second content upload: it is a local encrypted replica of Stream ciphertext the relay already stores. Its authenticated revocation feed carries `blob_id`, `click_id`, and `revoked_epoch`; its APNs poke carries only generic mutable content plus opaque `blob_id`/`click_id`. APNs tokens, those payload ids, and timing are sensitive routing/correlation metadata, even though none is a key, name, face, or media capability. ActivityKit is disabled. [Section 11.18](#1118-metadata-leaks-and-conceded-trust-boundaries) declares the full inventory.
 
-### 8.12 Render and develop: two events, and the `rendering` state
+### 8.12 Render and develop: two events, and the rendering state
 
 Sections 8.2–8.9 quietly assumed one thing that is true for a still photo and false for a clip: that obscuring finishes at capture. A photo's obscured render is produced in memory the instant the shutter fires ([section 8.2](#82-flow-a-frame-accessible-capture-memory-only)), so by the time the frame reaches the Light Table it is *already safe to show*. A clip cannot work that way — rendering a whole video well takes far longer than recording it (see [section 8.13](#813-video-and-live-photo-record-native-render-asynchronously)) — so the single "capture" moment splits into two distinct events, and the spec names them separately from here on:
 
@@ -1253,7 +1261,7 @@ This is the same develop/discard machinery §8.9 already defines for stills; the
 
 ### 8.18 The Live Photo output
 
-A Live Photo developed locally by myClick is a **genuine paired Live Photo**, not a flattened still or a loose video: an **obscured still** paired with an **obscured movie**, re-paired into a single Photos asset via one fresh, random shared content identifier (`kCGImagePropertyMakerAppleDictionary` asset-identifier / `PHLivePhoto` pairing). The identifier carries no account, person, Click name, biometric, or location. Both components come out of the same render decision ([section 8.14](#814-the-render-worker-preemptible-bounded-two-streaming-passes)): the paired movie is rendered like any clip, and the still is rendered as its key frame. Genuine pairing describes the output asset shape; it does **not** imply Apple Camera timing parity — the baseline timing is the explicitly synthetic, post-shutter-only form in [section 8.21](#821-baseline-synthetic-live-and-x11-apple-style-pre-roll).
+A Live Photo developed locally by myClick is a **genuine paired Live Photo**, not a flattened still or a loose video: an **obscured still** paired with an **obscured movie**, re-paired into a single Photos asset via one fresh, random shared content identifier (`kCGImagePropertyMakerAppleDictionary` asset-identifier / `PHLivePhoto` pairing). The identifier carries no account, person, Click name, biometric, or location. Both components come out of the same render decision ([section 8.14](#814-the-render-worker-preemptible-bounded-two-streaming-passes)): the paired movie is rendered like any clip, and the still is rendered as its key frame. Genuine pairing describes the output asset shape; timing is capability-specific — the baseline is explicitly post-shutter-only, while X11 is the separately gated native pre/post form in [section 8.21](#821-baseline-synthetic-live-and-x11-apple-style-pre-roll).
 
 - **The default key photo is the full-resolution obscured shutter frame** — the high-resolution still iOS captured at the shutter instant, obscured. This preserves the still's native resolution.
 - **A re-picked key frame is movie-resolution.** If the user chooses a different key frame from within the clip (the way Apple's "Make Key Photo" does), that frame comes from the movie track and therefore carries the movie's resolution, not the shutter still's — exact parity with Apple's own behaviour, stated so no one expects a re-picked frame to match the full-res shutter still.
@@ -1295,15 +1303,307 @@ Two capture products use the words "Live Photo" but have materially different so
 
 **Baseline — synthetic Live, no pre-roll.** The baseline captures the full-resolution still at the shutter press and records only an approximately 1.5-second movie beginning at or after that press. It contains **no pre-shutter frame**, keeps no rolling buffer, and makes no claim of Apple Camera timing parity. It may be developed as the genuine still+movie pair of [section 8.18](#818-the-live-photo-output), but "genuine pair" describes Photos-library pairing only. The baseline MUST NOT label its timing "Apple-style", "the same as Apple Live Photos", or equivalent.
 
-**X11 — Apple-style pre-roll is a separate later capability.** X11 adds pre-shutter media by one of two explicitly reviewed sources: a bounded rolling buffer owned by myClick, or an OS-owned Live capture that hands back a paired result. It does not silently upgrade or change the baseline. Before X11 may ship under a Click, all of the following are mandatory:
+**X11 — native Apple-style pre-roll is a separate, local-only capability.** X11 does not silently upgrade or change the baseline. It captures a full-resolution shutter still plus the native Live Photo paired movie, nominally centred on that shutter with motion before and after it. "Apple-style" describes that pre/shutter/post interaction and genuine Photos pairing; it does not claim byte-for-byte Apple Camera output, Apple's automatic motion trimming, wallpaper eligibility, or any undocumented system treatment.
 
-1. the retained source includes a complete still-and-movie component timeline covering the specified pre- and post-shutter window, with exact component timebases and PTS;
-2. every file-backed or OS-owned source component follows the per-file app-encrypted scratch, pre-registered durable journal, and pre-availability launch reconciliation contract of [section 8.4](#84-the-hardened-flow-b) — Data Protection-only clear scratch is non-conforming;
-3. an interrupted rolling/OS-owned capture has a durable, idempotent recovery or shred path; no pre-roll orphan may survive a launch sweep;
-4. rendering and any future Stream sidecar cover the complete timeline, including the still and every pre- and post-shutter movie sample; and
-5. timing-parity copy is prohibited until the implemented pre-roll window has a pinned, bench-verified contract. "Apple-style" names the interaction goal, not an unmeasured equivalence claim.
+#### 8.21.1 X11 capture source and capability gate
 
-X11 changes local capture only. Stream Live publication remains disabled independently until the atomic aggregate envelope required by [section 11.2.1](#1121-versioned-authenticated-envelope-and-aad) is implemented.
+**One source, not two alternatives.** X11 v1 uses `AVCapturePhotoOutput` native Live Photo capture. The earlier option of a myClick-owned rolling encoded buffer is withdrawn from X11 v1; adding one later requires a new custody and timing review. The native API returns the processed still to the app in memory and writes the paired movie to the exact `AVCapturePhotoSettings.livePhotoMovieFileURL` supplied by myClick. Because one load-bearing source component is an OS-written clear file, the **pair as a whole is Mode-A / Flow-B custody** even though the still component itself crosses the app boundary in memory.
+
+X11 is armed only when all of these predicates are true:
+
+1. `AVCapturePhotoOutput.isLivePhotoCaptureSupported == true`; `isLivePhotoCaptureEnabled` was set to `true` **before** `AVCaptureSession.startRunning()`; and the value remains true at request time.
+2. `isLivePhotoAutoTrimmingEnabled` was set to `false` before `startRunning()` and remains false. Apple's default trimming may intentionally shorten either side of the movie and is therefore incompatible with X11's minimum coverage. Disabling it is a deliberate difference from Apple Camera's default behaviour.
+3. The running session contains no `AVCaptureMovieFileOutput` (Apple documents that combination as incompatible with Live Photo capture), has suffered no interruption or reconfiguration since arming, and has accumulated at least `X11_ARMING_DWELL = 1.750 s` of continuous running time on a monotonic clock. Camera switch, format change, interruption, background, or session restart resets that dwell.
+4. The exact movie handoff URL has been pre-registered under §8.21.5, its dedicated parent directory is inside the app container, `NSFileProtectionComplete`, backup-excluded, and empty of any path not represented by a live custody record.
+5. A fresh `AVCapturePhotoSettings` is used for this request, its `livePhotoMovieFileURL` is that registered URL, and every delegate callback matches the request's `AVCaptureResolvedPhotoSettings.uniqueID`.
+6. No other X11 request is in flight (`X11_MAX_IN_FLIGHT = 1`). `willBeginCaptureFor` resolves non-zero photo and `livePhotoMovieDimensions`; the requested camera/lens/format/audio/orientation combination is in the release's reviewed, compile-time X11 allowlist; the processed still is exactly one JPEG or HEIC representation; the finished movie's actual codec is `avc1` or `hvc1`; and the device/OS build is inside the physical-device evidence matrix required by §8.21.8. RAW/ProRAW, bracketed capture, depth delivery, portrait effects mattes, semantic mattes, and other auxiliary photo resources are not X11 v1 inputs. No server flag or remote configuration may widen this allowlist.
+
+Any false predicate makes X11 unavailable before the shutter. A predicate that fails after request start aborts and reconciles that pair. The app MUST show a specific unavailable/capture-failed state and MUST NOT fall back to the synthetic post-only Live path, a plain still, a loose video, Normal Mode, a flattened poster frame, or an unreviewed Photos write. The baseline synthetic capability remains a separately named mode; it is never an error fallback for X11.
+
+#### 8.21.2 Exact timeline and tolerance
+
+All timing is exact `CMTime` rational arithmetic. A persisted time is `(value: Int64, timescale: UInt32, epoch: Int64)` with `timescale > 0`; invalid, indefinite, positive/negative infinity, rounded-from-`Double`, or overflowed times are rejected. Wall-clock timestamps and callback arrival times never establish media coverage.
+
+The X11 v1 constants are:
+
+| Constant | Normative value |
+|---|---:|
+| `X11_PRE_TARGET` | `1.500 s` |
+| `X11_POST_TARGET` | `1.500 s` |
+| `X11_SIDE_TOLERANCE` | `0.150 s` |
+| accepted pre-shutter coverage | `1.350...1.650 s`, inclusive |
+| accepted post-shutter coverage | `1.350...1.650 s`, inclusive |
+| `X11_ARMING_DWELL` | `1.750 s` continuous session time |
+| `X11_MAX_STILL_BYTES` | `33,554,432` (32 MiB) |
+| `X11_MAX_MOVIE_BYTES` | `67,108,864` (64 MiB) |
+| `X11_MAX_PRIMARY_VIDEO_SAMPLES` | `512` |
+
+Let `P_first` be the first primary-video sample's presentation start, `P_end` the greatest presentation end (`PTS + duration`) of the last primary-video sample, and `P_shutter` the `photoDisplayTime` delivered by `photoOutput(_:didFinishProcessingLivePhotoToMovieFileAt:duration:photoDisplayTime:resolvedSettings:error:)`. The source is accepted only when:
+
+```text
+D_pre  = P_shutter - P_first  ∈ [1.350 s, 1.650 s]
+D_post = P_end - P_shutter    ∈ [1.350 s, 1.650 s]
+```
+
+The callback `duration` MUST agree with `P_end - P_first` within the larger of one primary-video sample duration or one movie-timescale tick. The encoded still and movie MUST not exceed the byte caps above; the still dimensions are each `1...16,384`, the primary-video dimensions are each `1...4,096`, and the movie contains at most 512 primary-video samples. The native movie MUST contain exactly one supported `avc1` or `hvc1` primary video track, zero or one audio track, and exactly one `com.apple.quicktime.still-image-time` timed metadata sample. That sample's presentation time MUST agree with `P_shutter` within one movie-timescale tick, and a primary-video sample's presentation interval MUST contain `P_shutter`. Primary-video PTS and presentation ends must be finite and monotone; an unexplained gap greater than two adjacent nominal frame durations is a missing-timeline failure, not permission to synthesize or duplicate a frame.
+
+The obscured output keeps the **complete accepted native interval**; it does not trim away hard frames to manufacture apparent parity. Its first video PTS is normalized to zero and its still marker is:
+
+```text
+P_output_still = P_shutter - P_first
+```
+
+That value is preserved as an exact rational through render and remux. Output pre/post coverage MUST remain within the same inclusive bands, and the output marker may differ from the normalized source value by at most one output-timescale tick. If any source or output timing check fails, the pair remains undevelopable and is discarded or retried as a new capture; there is no timing repair, silent trim, post-only downgrade, frame duplication, or approximate `Double` comparison.
+
+#### 8.21.3 Pair custody, encryption, and unlink honesty
+
+**Pre-register before bytes.** The sealed X11 custody record and a fresh 128-bit creation nonce are committed before `capturePhoto(with:delegate:)`. The movie URL is a generated basename under the dedicated handoff directory, contains no user-derived text, and is bound to that record. The directory protection and backup-exclusion attributes are set before capture, but the finished movie's effective attributes are still verified after iOS closes it.
+
+**Per-component app encryption.** A fresh random 256-bit `K_source` is wrapped under the device store key in the sealed custody record. The two component keys are domain-separated:
+
+```text
+K_still = HKDF-SHA256(
+  IKM = K_source,
+  salt = SHA-256(ENCODE(item_id, creation_nonce)),
+  info = "myclick.x11.source.still.v1",
+  L = 32)
+
+K_movie = HKDF-SHA256(
+  IKM = K_source,
+  salt = SHA-256(ENCODE(item_id, creation_nonce)),
+  info = "myclick.x11.source.movie.v1",
+  L = 32)
+```
+
+`ENCODE` is the canonical encoding defined in [section 11.2.1](#1121-versioned-authenticated-envelope-and-aad). Each key performs exactly one successful AES-256-GCM seal with a fresh CSPRNG 96-bit nonce. Component AAD is `ENCODE("myclick.x11.source-component.v1", item_id, creation_nonce, component_role, plaintext_byte_length)`, where `component_role` is an exact `U32` (`0` for still, `1` for movie) and `plaintext_byte_length` is `U64`. A component cannot be swapped between roles, captures, or records without authentication failure. An uncertain seal is abandoned by destroying `K_source`; ciphertext is never recreated under an uncertain component key. `K_source`, `K_still`, and `K_movie` working copies are explicitly zeroed as soon as their current wrap/seal operation completes.
+
+**First app-controlled boundary.**
+
+- The still's `AVCapturePhoto.fileDataRepresentation()` exists only in bounded app memory. myClick validates the matching resolved-settings id and immediately seals those bytes to the still ciphertext; it MUST NOT first write a clear still file. Every app-owned mutable byte buffer, decoded pixel buffer, and metadata working copy is explicitly zeroed after the authenticated component commit; the framework-owned `AVCapturePhoto`/backing storage is released immediately. The app cannot prove when iOS reuses framework-owned RAM and does not claim that platform memory is app-zeroable.
+- The paired movie is different: iOS writes the registered clear handoff. On the successful finished-processing callback, myClick first commits the `handoff_recorded` facts, then opens the generated basename relative to an already-open dedicated-directory descriptor with `openat(O_RDONLY | O_NOFOLLOW | O_CLOEXEC)`. It uses `fstat` on that descriptor to require one app-owned regular file with link count `1`, the recorded `st_dev`/`st_ino`, effective `NSFileProtectionComplete`, backup exclusion, the recorded final byte length, and no size change before versus after the exact-length read. Encryption reads only that descriptor; it never resolves the path again or creates another clear file. Immediately before cleanup, `fstatat(..., AT_SYMLINK_NOFOLLOW)` must still identify the same `st_dev`/`st_ino`; cleanup then uses `unlinkat` against the same parent descriptor and verifies a second `fstatat` reports absence. No clear thumbnail, QuickLook item, share item, or Photos resource is made from the source.
+- App-encrypted component partials and final ciphertexts are themselves `NSFileProtectionComplete` and backup-excluded. They are scratch until the pair's review sidecar commits; a complete accepted pair is then promoted atomically into the pocket lane in state `rendering`.
+
+Once the movie ciphertext authenticates, its component substate advances to `sealed_clear_present`. The clear path remains available only for the short interval needed to validate the complete still+movie source and commit the pocket sidecar. Immediately after `review_committed`, myClick re-verifies identity, calls the platform remove/unlink API, verifies the exact registered path absent, records `sealed_clear_absent`, and removes the custody record. Any failure before review commit takes the same unlink path as part of `aborting`. This is **not crypto-shredding**: the OS handoff had no app-held key, and prior flash blocks may remain recoverable under platform behaviour. Destroying `K_source` crypto-shreds the two app-encrypted components; unlinking the clear movie only removes the path and is always described that way. X11 is the two-component specialization of §8.4's generic seal-before-unlink machine and inherits the residual and public wording of [sections 8.4–8.5](#84-the-hardened-flow-b).
+
+#### 8.21.4 Durable records
+
+X11 adds two closed, device-local record shapes. Both use deterministic CBOR (RFC 8949 §4.2): definite lengths, shortest integer encodings, sorted integer map keys, no duplicate or unknown keys, and the exact schema below. They are sealed under the device store key, never synced or backed up, and never sent to the relay.
+
+```cddl
+x11-u8 = 0..255
+x11-u16 = 0..65535
+x11-u32 = 0..4294967295
+x11-u64 = 0..18446744073709551615
+x11-i64 = -9223372036854775808..9223372036854775807
+x11-uuid = bstr .size 16
+x11-sha256 = bstr .size 32
+x11-nonce96 = bstr .size 12
+x11-tag128 = bstr .size 16
+x11-time-v1 = [x11-i64, 1..4294967295, x11-i64]
+                                  ; CMTime value, timescale, epoch
+
+x11-phase-v1 = 0 / 1 / 2 / 3 / 4 / 5
+                                  ; registered / collecting / source_ready /
+                                  ; review_committed / aborting / reconciled
+x11-failure-v1 = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10
+                                  ; none / unsupported / callback / file /
+                                  ; crypto / timing / pairing / interruption /
+                                  ; storage / corruption / cleanup
+
+x11-envelope-ref-v1 = {
+  0: tstr .size (1..96),          ; generated encrypted-blob basename
+  1: x11-u64,                     ; plaintext byte length
+  2: x11-sha256,                  ; SHA-256 of plaintext component
+  3: x11-nonce96,
+  4: x11-tag128,
+  5: x11-u64                      ; complete envelope byte length
+}
+
+x11-file-identity-v1 = {
+  0: x11-u64,                     ; lstat st_dev, losslessly represented
+  1: x11-u64,                     ; lstat st_ino, losslessly represented
+  2: x11-u64,                     ; final clear byte length
+  3: true,                        ; effective NSFileProtectionComplete verified
+  4: true                         ; effective backup exclusion verified
+}
+
+x11-still-component-v1 =
+  { 0: 0 } /                      ; missing
+  { 0: 1, 1: x11-envelope-ref-v1 }; sealed
+
+x11-movie-component-v1 =
+  { 0: 0 } /                      ; missing
+  { 0: 1, 1: x11-file-identity-v1 } /
+                                  ; handoff_recorded
+  { 0: 2, 1: x11-file-identity-v1, 2: x11-envelope-ref-v1 } /
+                                  ; sealed_clear_present
+  { 0: 3, 1: x11-file-identity-v1, 2: x11-envelope-ref-v1 }
+                                  ; sealed_clear_absent
+
+x11-configuration-v1 = {
+  0: x11-sha256,                  ; SHA-256(camera unique id UTF-8)
+  1: 1..16384,                    ; active-format width
+  2: 1..16384,                    ; active-format height
+  ? 3: 1..16384,                  ; resolved still width
+  ? 4: 1..16384,                  ; resolved still height
+  ? 5: 1..4096,                   ; resolved Live movie width
+  ? 6: 1..4096,                   ; resolved Live movie height
+  ? 7: x11-u32,                   ; resolved codec fourcc: avc1 or hvc1
+  8: 1..8,                        ; EXIF orientation
+  9: bool,                        ; audio requested
+  10: false,                      ; Live auto trimming, always disabled
+  ? 11: 0..1                     ; processed still codec: jpeg / heic
+}
+
+x11-source-pair-v1 = {
+  0: tstr .size 36,               ; canonical lowercase source UUID
+  1: x11-time-v1,                 ; callback duration
+  2: x11-time-v1,                 ; P_first
+  3: x11-time-v1,                 ; P_end
+  4: x11-time-v1,                 ; P_shutter
+  5: x11-time-v1,                 ; source timed-marker PTS
+  6: 1,                           ; primary video track count
+  7: 0..1,                        ; audio track count
+  8: 1,                           ; still-image-time marker count
+  9: true                         ; all pairing/timeline validation passed
+}
+
+x11-custody-record-v1 = {
+  0: 1,                           ; schema_version
+  1: x11-uuid,                    ; item_id, UUIDv4
+  2: bstr .size 16,               ; creation_nonce
+  3: x11-phase-v1,
+  4: x11-u64,                     ; registered_at Unix milliseconds
+  5: x11-i64,                     ; AVCapturePhotoSettings.uniqueID
+  6: tstr .size (1..96),          ; generated clear-handoff basename
+  7: x11-configuration-v1,
+  8: bool,                        ; final didFinishCaptureFor succeeded
+  9: x11-still-component-v1,
+  10: x11-movie-component-v1,
+  ? 11: x11-source-pair-v1,
+  12: bstr .size (1..256),         ; device-store-key wrap of K_source
+  13: x11-uuid,                    ; fresh output content identifier
+  ? 14: x11-uuid,                 ; committed pocket sidecar/item id
+  15: x11-failure-v1
+}
+
+x11-source-timeline-v1 = {
+  0: x11-time-v1,                 ; P_first
+  1: x11-time-v1,                 ; P_end
+  2: x11-time-v1,                 ; P_shutter
+  3: x11-time-v1,                 ; source timed-marker PTS
+  4: x11-time-v1,                 ; callback duration
+  5: 1..4294967295,               ; primary-video timescale
+  ? 6: [x11-time-v1, x11-time-v1] ; audio start, end
+}
+
+x11-key-photo-v1 =
+  { 0: 0 } /                      ; full_resolution_shutter
+  { 0: 1, 1: x11-time-v1 }        ; user-picked movie time
+
+x11-click-context-v1 = [1*4096 [x11-uuid, x11-u64]]
+                                  ; sorted unique Click id + roster version
+
+x11-pocket-source-v1 = {
+  0: 1,                           ; schema_version
+  1: 0,                           ; native_live_preroll_v1
+  2: x11-uuid,                    ; item_id
+  3: bstr .size 16,               ; creation_nonce
+  4: [x11-envelope-ref-v1, x11-envelope-ref-v1],
+                                  ; still first, movie second
+  5: bstr .size (1..256),          ; device-store-key wrap of K_source
+  6: x11-source-timeline-v1,
+  7: x11-uuid,                    ; output content identifier
+  8: x11-key-photo-v1,
+  9: x11-click-context-v1,
+  10: 0                           ; initial pocket state: rendering
+}
+```
+
+The custody record is committed before capture and retained through clear-handoff reconciliation. `x11-configuration-v1` keys `0...2` and `8...10` are present at registration; resolved dimension keys `3...6` are added atomically from `willBeginCaptureFor` before any component is accepted; movie-codec key `7` is added only after the finished movie can be inspected; still-codec key `11` is added from the authenticated still representation. The custody-record basename is `<lowercase-item-uuid>.<lowercase-creation-nonce-hex>.x11custody.enc`, and its AES-GCM AAD is `ENCODE("myclick.x11.custody-record.v1", item_id, creation_nonce)`; filename, decrypted fields, and AAD must agree. Every handoff/blob name is generated ASCII with no slash, traversal, symlink, or absolute-path input and resolves only under its dedicated directory. `x11-click-context-v1` is sorted lexicographically by raw UUID bytes and contains no duplicate Click id.
+
+**"Committed" means crash-durable, not assigned in memory.** A new blob or record is written to a same-directory generated temporary file with its final protection/backup attributes, fully written, authenticated where applicable, `fsync`ed, atomically renamed to its final basename, and followed by `fsync` of the parent directory before the state machine performs the external action that depends on it. Every custody-record rewrite uses a fresh CSPRNG 96-bit AES-GCM nonce under the device store key; changed plaintext is never sealed again with an old or uncertain nonce. Blobs commit before the record that references them; record replacement uses the same write/sync/rename/sync sequence. A failed RNG, write, authentication, or unsupported durability call fails the capture. No callback, key destruction, clear-file unlink, or Photos handoff may rely on an unflushed state transition.
+
+The still and movie source identifiers are parsed as UUIDs and compared as raw 16-byte values; the canonical lowercase source string is retained only inside the sealed custody record long enough to validate the native pair. It is not provenance and is never copied into the developed pair. File identity is the exact canonical path plus `lstat` regular-file facts, `st_dev`, `st_ino`, final byte length, link count `1`, app ownership, and the two required effective protection facts; a mismatch is an alien file and is unlinked without import.
+
+`x11-pocket-source-v1` is embedded in the existing pocket sidecar and committed blob-first/sidecar-last. Its two envelope references and wrapped `K_source` are byte-equal to the custody record, its source timeline is exact, its output id is stable for the item, and its Click context obeys §8.16. A later key-photo re-pick changes only `x11-key-photo-v1`; the source timeline does not move.
+
+The ordinary pocket sidecar continues to hold strip order, review state, render references, and develop idempotency. X11 does not create a parallel unjournaled review set: this extension is the durable review-set journal contract for the pair. The pocket item is not exposed to the renderer or Light Table until `review_committed` has removed and verified absence of the custody record, so no second surviving `K_source` wrap can outlive reconciliation.
+
+#### 8.21.5 Capture, crash, kill, and relaunch state machine
+
+The following aggregate phases are normative. Component callbacks may arrive in either order; phase advancement depends on durable predicates, never callback ordering assumptions.
+
+| Phase | Durable predicate | Only permitted action / next phase |
+|---|---|---|
+| `registered` | custody record, wrapped `K_source`, generated movie path, and expected configuration committed before the capture request | issue exactly one matching native Live request, then `collecting`; or `aborting` |
+| `collecting` | request is live; still/movie substates advance independently and every update is atomic | continue the exact request; when all `source_ready` predicates hold, advance; on any error/interruption/background/lock/cancel, `aborting` |
+| `source_ready` | still ciphertext authenticates; movie ciphertext authenticates; source pair/timing validates; and `capture_finished_success == true`; the clear movie may still be the exact recorded file | commit the pocket blobs then `x11-pocket-source-v1` sidecar last; advance to `review_committed` |
+| `review_committed` | load-bearing pocket sidecar exists in `rendering` and references exactly the authenticated pair | re-verify and unlink any recorded clear movie, verify path absence, record `sealed_clear_absent`, remove the custody record, then `reconciled` |
+| `aborting` | no output may be reviewed/developed; a clear path and/or encrypted partial may remain | unlink and verify the registered clear path absent; destroy `K_source` before deleting encrypted component bytes; then `reconciled` with no pocket item |
+| `reconciled` | clear path absent and either one complete pocket item exists or all component key material/bytes are destroyed | terminal; custody record may be absent |
+
+Normal callback handling is exact:
+
+1. Commit `registered`; call `capturePhoto`; atomically record `collecting`.
+2. On the still callback, require the unique id and no error, seal directly from memory, authenticate the result, then atomically set `still_component = sealed`.
+3. On the finished-processing movie callback, require the unique id, exact URL, and no error; commit `movie_component = handoff_recorded` **before** reading. Verify the file facts, seal/authenticate it, and record `sealed_clear_present`.
+4. On final `didFinishCaptureFor`, require the same unique id and no error before setting `capture_finished_success = true`.
+5. Recompute all pair/timeline predicates from authenticated still metadata and the movie asset. Only their conjunction permits `source_ready`; only sidecar-last pocket commit permits `review_committed`; review commit is followed immediately by descriptor-bound unlink, verified path absence, and custody-record removal before the pocket item is exposed.
+
+**Launch reconciliation is pre-availability.** On every cold launch or process restart, before Camera, Light Table, Stream, notification media, or playback becomes available, myClick enumerates the custody records, X11 handoff directory, and encrypted scratch blobs:
+
+- `registered` or `collecting` without a durably recorded finished movie is never guessed complete. Any matching clear path is platform-unlinked and verified absent; component ciphertext is crypto-shredded; the capture is abandoned.
+- A `handoff_recorded` movie may be imported after relaunch **only** when the record also has `capture_finished_success == true`, a sealed authentic still, exact matching file identity/length, and all required timing facts. Otherwise it is unlinked, the still is shredded, and no pair is recovered.
+- `sealed_clear_present` with every other durable `source_ready` predicate resumes the sidecar-last pocket commit and then descriptor-bound unlink/absence verification. Without those predicates it goes to `aborting`, unlinks the clear path, and destroys all component key material.
+- `source_ready` resumes the sidecar-last pocket commit idempotently. If the exact sidecar already exists, it must authenticate and match item id, nonce, both envelope references, wrapped key, timeline, output id, and Click context byte-for-byte before the phase advances; a different existing sidecar is corruption, never overwritten. A blob authentication failure, missing component, mismatched item/nonce/role, or timing failure goes to `aborting`.
+- `review_committed` never reimports or re-renders from the clear path; it verifies absence and removes the custody record. A missing load-bearing pocket source component makes the pocket item corrupt and undevelopable, crypto-shreds the remaining item, and fails loud.
+- `aborting` resumes key destruction, platform unlink, and absence verification idempotently.
+- An unjournaled clear file in the dedicated directory is platform-unlinked and reported. An unreferenced encrypted partial is deleted; because no surviving wrap grants its key, it is already cryptographically unreadable.
+- An unknown record version/state blocks every media surface; it never triggers a permissive parser or alternate storage path. If a custody record cannot open under the current device key, the reconciler cannot trust any association: it platform-unlinks **every** file in the dedicated clear-handoff directory, verifies the directory empty, deletes the now-unreadable encrypted scratch, and reports loss of the interrupted capture. It may reopen media surfaces only after that complete sweep. Any enumeration, unlink, or absence-verification failure remains blocking.
+
+Background, session interruption, camera switch, device lock, process kill, jetsam, crash, low storage, and capture cancellation before `source_ready` all request `aborting`. If Data Protection prevents cleanup while locked, the sealed record remains pending and all media surfaces remain blocked until unlock and successful reconciliation. A user force-quit does not waive cleanup on the next launch.
+
+#### 8.21.6 Whole-pair recognition and obscuring
+
+The renderer treats the accepted still and movie as one observation interval. Pass 1 MUST decode and account for every primary-video sample from `P_first` through `P_end`, including every pre-shutter and post-shutter sample, and MUST separately analyse the full-resolution shutter still at `P_shutter`. A pre-roll frame is not a preview, disposable context, or lower-trust input; it receives the same detection, matching, tracking, manual-correction, and anonymity floor as every later frame.
+
+Person tracks span the whole interval. The still observation is associated with the movie track at `P_shutter` only when identity continuity is unambiguous. A still-only face becomes its own observation; an ambiguous still/movie association forces the affected person obscure in both components. One keep-or-obscure verdict is applied to every observation in a resolved track, so recognition cannot reveal a person only before or only after the shutter. Any undecodable sample, unsupported transform, missing frame interval, detector/segmenter failure, tracker identity ambiguity that cannot be resolved, or render/checkpoint mismatch leaves that subject obscure or fails the complete render; it never skips a frame.
+
+The frozen Click context and fresh roster-at-render/develop rules of §8.16 apply to the pair once. Per-face embeddings — especially every unconsented face's embedding — exist only for the immediate in-memory match, are zeroed immediately afterward, and MUST NOT enter a checkpoint, track map, sidecar, log, metric, thumbnail, or crash report. Durable render checkpoints may contain only frame ordinals/times, non-biometric track ids, regions/masks, final verdicts, and roster-version stamps. They contain no face crop, embedding, similarity vector, or reusable unknown-person signature. Neither source plaintext, source ciphertext, render checkpoint, nor source metadata is uploaded or added to any Stream object.
+
+Pass 2 writes both the obscured full-resolution still and obscured movie from that complete decision set. The safe render commits as one encrypted pocket aggregate: both render components and their timeline/pairing facts authenticate before the item may leave `rendering`. A crash or failure after only one render component produces no reviewable/developable pair; the encrypted partial is crypto-shredded or replaced by an idempotent complete re-render. The optional native audio track is trimmed/retimed with the accepted movie interval and passed through unchanged under §8.18; it is not analysed or represented as anonymised.
+
+#### 8.21.7 Real pairing, provenance, and develop
+
+The developed result MUST satisfy Apple's two-resource Live Photo shape before Photos sees either file:
+
+1. Mint one fresh, canonical lowercase UUIDv4 `output_content_identifier`, store it in the sealed pocket record, and use it in both output components. Never reuse the native source identifier; the negligible random-equality case is still checked and causes a new output id to be minted before `source_ready`.
+2. Put that exact string in the obscured still's Apple Maker Note asset-identifier field. Current Apple files expose this as key `17` inside `kCGImagePropertyMakerAppleDictionary`; Apple publishes the dictionary but no named constant for key `17`, so this dependency is an explicit physical-device compatibility gate, not an assumed stable contract.
+3. Put the same string in the obscured movie's top-level `AVMetadataIdentifier.quickTimeMetadataContentIdentifier` item.
+4. Write exactly one timed metadata sample identified by `AVMetadataIdentifier.quickTimeMetadataStillImageTime` at `P_output_still`. Preserve the native sample's data type/value while retiming it; do not invent a magic payload byte. The output parser must recover exactly one marker at the expected rational time.
+5. Make the full-resolution obscured shutter still the default key photo. A user-selected movie key frame follows §8.18 and moves the timed marker to that exact in-range movie time before develop.
+
+The writer does not wholesale-copy native source metadata. It allowlists orientation/transform, colour/HDR fields required to render correctly, codec/container facts, the new pair identifier/marker, and the provenance fields below. It strips the native source pair id, GPS/location, face metadata, thumbnails, device owner text, and any unknown MakerApple/QuickTime item rather than copying an unreviewed correlator into the developed asset.
+
+**Provenance is one exact token, twice.** After the final roster re-evaluation and final complete-pair render, myClick generates the existing schema-version-first name-free provenance JSON of §8.20 once. The exact same UTF-8 token bytes are embedded in the still's EXIF `UserComment` + XMP and the movie's QuickTime `mdta` + `XMP_`. X11 adds no source content id, precise pre-roll timeline, camera unique id, face timing, biometric, or location to that token. The pair id is pairing metadata, not provenance. Stamp failure in either component aborts the whole Live develop; the standalone-video stamp fallback in §8.20 does not apply.
+
+Before develop, myClick re-opens the two obscured staging resources and verifies: equal output content identifiers; exactly one in-range still marker at the sealed expected time; accepted pre/post coverage; complete decodability; current roster-version stamp; and byte-identical provenance tokens in both components. It rechecks the roster versions immediately before opening the Photos transaction; any change invalidates both staging resources and forces a complete-pair re-render. It also requires `PHAssetCreationRequest.supportsAssetResourceTypes([.photo, .pairedVideo])`. Develop uses **one** `PHAssetCreationRequest` with exactly one `.photo` and one `.pairedVideo` resource. The two already-obscured staging files live only in a dedicated `NSFileProtectionComplete`, backup-excluded develop directory and are removed on transaction completion, cancellation, background/lock, and the pre-availability launch sweep. If preflight, pairing, stamping, Photos permission, or the change transaction fails, neither component may be deliberately written through another request; the pocket item remains, the staging files are cleaned, and the error is loud. There is no still-only, video-only, loose-pair, or metadata-free fallback.
+
+After the paired Photos transaction succeeds, the existing sidecar-last develop commit marks the write complete before destroying the pocket source key. Destroying `K_source` then crypto-shreds both retained source components together. The developed obscured Live Photo is outside myClick's boundary and inherits the forward-only limit of §9.3.
+
+#### 8.21.8 X11 implementation gates and Stream exclusion
+
+X11 remains disabled in release builds until all of these artifacts have passed protocol and security review:
+
+1. **Protocol/claim gate:** this section and the capture-on-disk ADR agree on native Flow-B custody, platform-unlink honesty, pairing, timing, and unsupported-state copy before app implementation lands.
+2. **Public-API/format gate:** a release-build probe on every supported device/OS/configuration confirms native pre/post capture, callback ordering by unique id, non-zero resolved dimensions, source content-id equality, one source still marker agreeing with `photoDisplayTime`, effective file protection/backup exclusion, the key-17 output dependency, `PHLivePhotoView` playback, and Photos recognising the result as one Live Photo.
+3. **Timing gate:** at least 100 cold/warm captures per allowlisted configuration on the lowest supported physical device and current supported OS boundaries satisfy the inclusive pre/post bands after the `1.750 s` arming dwell, with auto trimming off. Boundary tests cover immediate session start, exactly-before/at/after dwell, interruption, camera switch, orientation change, audio off/on, low storage, thermal pressure, and rapid successive requests. Any miss removes that configuration from the allowlist or requires a reviewed protocol amendment; runtime does not widen tolerance.
+4. **Custody/recovery gate:** deterministic fault injection before and after every durable transition and every component write proves that relaunch either produces exactly one authenticated `rendering` pocket pair or no pair, with the registered clear path absent. Boundary fixtures at the exact byte caps and cap+1 measure the chosen local AES-GCM implementation's peak memory, temporary storage, latency, cancellation, and ciphertext/plaintext coexistence on the lowest supported physical device; values above a cap are rejected before any app-owned copy, decode, or seal (the OS-delivered still callback object may already exist). Descriptor-replacement, symlink, hard-link, size-change, locked-device, key-loss, and unlink-failure tests prove substitution is rejected and media surfaces remain blocked until reconciliation. Tests and claims say platform unlink for clear handoff, crypto-shred only for app-encrypted components.
+5. **Render gate:** fixture and device tests prove every pre/still/post observation is included, cross-shutter tracks receive one fail-closed verdict, undecodable/missing samples block develop, and no face crop/embedding — especially for an unconsented face — appears in persistent records, checkpoints, logs, or crash output.
+6. **Develop gate:** parsed output proves fresh equal content identifiers, one exact still marker, full-resolution shutter key photo, byte-identical provenance in both components, atomic `.photo + .pairedVideo` creation, and loud failure with no plain still/video downgrade.
+
+These are implementation gates, not permission to publish Live aggregates. X11 changes **local capture, review, and develop only**. Stream wire v1 admits stills and capped whole-file plain video under §11.2.1, but `live`, X11 pre-roll pairs, their still or movie components published as Live, a flattened poster escape hatch, and any relabelled Live derivative remain rejected by §11.2.1's typed pre-row gate before `K_blob` mint, upload staging, relay row/object/ticket creation, cache entry, or APNs enqueue. Opening Stream Live requires a separate reviewed atomic aggregate wire schema; this section neither supplies nor implies one.
 
 ## 9. Revocation (key rotation; forward-immediate, forward-only)
 
