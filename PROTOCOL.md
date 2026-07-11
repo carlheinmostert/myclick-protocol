@@ -2,7 +2,7 @@
 
 **Status: DRAFT — in active design (2026-05-28). Nothing here is final.**
 
-All thirteen sections are drafted; section 11 (streaming relay and distribution) and section 12 (notification and live delivery) specify the post-v1.0 guardian photo-return feature and its live-delivery layer, and land after the v1.0 surfaces they depend on. This is still a draft, not a final spec: the empirical calibration (template count, match threshold, false-accept ceiling, re-enrolment bands) is validated in the closed beta, and the v2 metadata-hiding items in section 13 remain open. **Stream v1 admits stills only; video publication remains protocol-blocked until the measured whole-file CryptoKit gate in section 11.2.1 passes. Live, X11 pre-roll, and chunked media are also disabled at the pre-row gate.** Everything here is subject to change as the design firms up — this banner will be updated as sections lock.
+All thirteen sections are drafted; section 11 (streaming relay and distribution) and section 12 (notification and live delivery) specify the post-v1.0 guardian photo-return feature and its live-delivery layer, and land after the v1.0 surfaces they depend on. This is still a draft, not a final spec: the empirical calibration (template count, match threshold, false-accept ceiling, re-enrolment bands) is validated in the closed beta, and the v2 metadata-hiding items in section 13 remain open. **Stream wire v1 admits stills and measured whole-file video under the pinned §11.2.1 caps (founder-approved provisional open, 2026-07-11). Live aggregates, X11 pre-roll publication, chunked media, and notification-extension video fetch remain disabled at the pre-row gate.** Everything here is subject to change as the design firms up — this banner will be updated as sections lock.
 
 This document specifies the cryptographic protocol behind myClick: how faces become encrypted embeddings, how members of a Click share the ability to recognise each other's children, how source originals and obscured Stream outputs have different custody, what pseudonymous routing metadata remains server-visible, and how revocation works. The server cannot decrypt biometric templates or Stream media, but it does observe the metadata and ciphertext-size signals enumerated below.
 
@@ -124,15 +124,15 @@ Each construct below gets a precise definition and a one-line plain gloss.
   *In plain terms: one person's content key, locked for one audience.*
 - **GroupKeyWrap** — a GroupKeyVersion encrypted under one member's identity public key, so only that member's Secure Enclave can unwrap it. This is how a group key reaches each member without the server ever holding a usable copy.
   *In plain terms: the group key, locked so only one member can open it.*
-- **Logical publication** — one immutable, client-identified media object sent to one Click, with one root expiry and no v1 predecessor or successor. V1 admits stills only; video is measurement-gated and Live is rejected until later protocol versions satisfy their explicit gates ([section 11.2.1](#1121-versioned-authenticated-envelope-and-aad)).
+- **Logical publication** — one immutable, client-identified media object sent to one Click, with one root expiry and no v1 predecessor or successor. V1 admits stills and whole-file video under the pinned §11.2.1 caps; Live aggregates, X11 Stream publication, and chunked media remain rejected until their explicit later gates ([section 11.2.1](#1121-versioned-authenticated-envelope-and-aad)).
   *In plain terms: one locked media item sent once to one Click.*
 - **Publication content key (`K_blob`)** — one fresh AES-256 key generated for exactly one logical publication. HKDF-derived payload and sidecar subkeys authenticate that publication under purpose-separated AAD; `K_blob` itself is wrapped under a dedicated HKDF-derived Stream epoch wrap key with GroupKeyVersion bound only at the wrap layer ([section 11.2](#112-per-blob-content-key-wrapped-under-the-stream-epoch-key)).
   *In plain terms: the one-use key for one published media item.*
-- **Authenticated media envelope** — the versioned Stream wire object whose encrypted v1 manifest admits only `still`; any future video/Live kind requires a reviewed version/gate. The outer representation reveals no direct media descriptor. The relay treats it only as opaque `application/octet-stream`; recipients authenticate the complete envelope and compare its bound context with the delivery record before any display ([section 11.2.1](#1121-versioned-authenticated-envelope-and-aad)).
+- **Authenticated media envelope** — the versioned Stream wire object whose encrypted v1 manifest admits `still` or whole-file `video` under the pinned §11.2.1 caps; Live aggregates and chunked kinds still require a reviewed later gate. The outer representation reveals no direct media descriptor. The relay treats it only as opaque `application/octet-stream`; recipients authenticate the complete envelope and compare its bound context with the delivery record before any display ([section 11.2.1](#1121-versioned-authenticated-envelope-and-aad)).
   *In plain terms: a type-hiding locked package that cannot be moved to another Click or publication without detection.*
 - **Stream epoch key** — a random AES-256 key for one Click membership cohort and epoch generation, distributed separately from the biometric group key. A new member receives only the newly-created current/future Stream epoch; they receive no old Stream epoch key or old publication wrap ([sections 6.2.2](#622-separate-stream-history-epochs) and [11.6](#116-stream-epoch-rotation-re-wraps-unshredded-publications)).
   *In plain terms: the Stream-history lock that prevents a newcomer opening older publications.*
-- **Media observation sidecar** — the versioned, `K_blob`-rooted encrypted record of **recognised, freshly distributable subjects in the one target Click only**: v1 still geometry/mask, the verdict actually applied, and the effective recipe/renderer version. It contains no stable cross-item id, unknown-person record, biometric, crop/pixel/audio content, or accepted moving-media branch, and it authorises no v1 successor ([sections 11.2.2](#1122-canonical-v1-records) and [11.3](#113-the-blind-relay)).
+- **Media observation sidecar** — the versioned, `K_blob`-rooted encrypted record of **recognised, freshly distributable subjects in the one target Click only**: v1 still geometry/mask, the verdict actually applied, and the effective recipe/renderer version. It contains no stable cross-item id, unknown-person record, biometric, or crop/pixel/audio content. V1 video may carry a whole-clip subject set (not a per-frame timeline); Live aggregates remain rejected. It authorises no v1 successor ([sections 11.2.2](#1122-canonical-v1-records) and [11.3](#113-the-blind-relay)).
   *In plain terms: a sealed record of how known Click subjects were treated, not a second biometric database.*
 
 App-domain constructs — guardianship, the opt-in approval flow, premises, licences, and subscriptions — are defined in the companion data model (myClick repo, `docs/data-model.md`), not here, because the cryptography does not depend on them. In the canonical model, "opt-in" appears only as its cryptographic shadow: a person's content key is wrapped under a Click's group key. The body prose elsewhere (sections 1 and 5 through 9) still mentions premises, opt-in, and capture for narrative context; only this canonical model is restricted to crypto-relevant constructs.
@@ -964,7 +964,7 @@ Three features hold **app-encrypted** blobs on disk: a Flow-B encrypted-import p
 |------|-------|----------------|---------|
 | **scratch** | an app-encrypted partial being imported from a registered Flow-B handoff | promoted atomically to pocket or crypto-shredded; reconciled to empty on launch | Flow B encrypted import ([section 8.4](#84-the-hardened-flow-b)) |
 | **pocket** | a Mode-A app-encrypted source original, cached obscured render, and optional encrypted capture-depth blob | kept until the user decides — keep, discard, or switch-off | the Light Table ([section 8.9](#89-the-light-table-persistent-review-and-the-switch-off-commit)) |
-| **stream** | an app-encrypted obscured received still (video only after §11.2.1's measurement gate) | kept until the earlier of relay/local expiry, retract, or withdrawal denial, then crypto-shredded | Guardian's local gallery |
+| **stream** | an app-encrypted obscured received still or §11.2.1-capped whole-file video | kept until the earlier of relay/local expiry, retract, or withdrawal denial, then crypto-shredded | Guardian's local gallery |
 
 ```mermaid
 flowchart TB
@@ -1007,7 +1007,7 @@ The Light Table has two custody modes that share presentation but not persistenc
 
 **Mode-A pocket storage.** A captured frame is obscured in memory and any review original is app-encrypted before pocket commit, together with a cached obscured render. A Mode-A capture with trustworthy `AVDepthData` MAY also seal the optional capture-depth blob of §8.8. The encrypted original supports later manual face-fix and edit replay; each use decrypts only in memory and zeroes the working bytes.
 
-**Mode-B attended grid.** A batch starts only while the app is foreground, unlocked, and the operator remains on the import/review surface. Each external item is opened under its user-granted provider/Photos access and read in place. Detection, correction, and obscuring use bounded memory; myClick may write the completed **obscured derivative**, but MUST NOT write an imported-original, source-equivalent transcode, source pocket item, or durable source bookmark that allows unattended continuation. Background, lock, navigation away, permission loss, or cancellation closes all source handles, zeroes the working set, and marks uncompleted items cancelled. The operator may restart from the external source; the app does not resume from a hidden copy. A Mode-B video remains additionally blocked from Stream publication by §11.2.1 even if local attended processing exists.
+**Mode-B attended grid.** A batch starts only while the app is foreground, unlocked, and the operator remains on the import/review surface. Each external item is opened under its user-granted provider/Photos access and read in place. Detection, correction, and obscuring use bounded memory; myClick may write the completed **obscured derivative**, but MUST NOT write an imported-original, source-equivalent transcode, source pocket item, or durable source bookmark that allows unattended continuation. Background, lock, navigation away, permission loss, or cancellation closes all source handles, zeroes the working set, and marks uncompleted items cancelled. The operator may restart from the external source; the app does not resume from a hidden copy. A Mode-B video may enter Stream publication only when it satisfies the same §11.2.1 whole-file video caps and attended-processing rules; oversized or unattended Mode-B video remains blocked.
 
 **Pre-develop edit history (the durable op-list).** A pocket still's editable picture is not a baked file — it is the encrypted original plus an ordered, reversible list of edit operations re-derived over it at display time (depth-of-field, Focus/Blur strokes, person removal, obscure-style changes, destination-lens tweaks). That **op-list is a first-class field of the pocket item's sealed metadata sidecar** (`<id>.meta.enc` under the device store key — [section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal); ADR-0008 / ADR-0035). Semantics, locked with ADR-0035 (2026-07-09):
 
@@ -1056,7 +1056,7 @@ flowchart TB
 
 ### 8.10 The encrypted on-disk display cache (Stream receive)
 
-The Stream's receive feed decrypts each incoming publication to display it. Holding every display derivative only in memory would make a cold relaunch re-fetch the relay envelope and recover the Stream epoch key again. The **display cache** is a fourth use of the on-device encrypted store machinery ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)): it may persist a display derivative or the already-authenticated received media, but **only app-encrypted**. V1 caches stills only; the video clauses below are dormant requirements for a future version that passes §11.2.1's measurement/schema gate.
+The Stream's receive feed decrypts each incoming publication to display it. Holding every display derivative only in memory would make a cold relaunch re-fetch the relay envelope and recover the Stream epoch key again. The **display cache** is a fourth use of the on-device encrypted store machinery ([section 8.8](#88-the-on-device-encrypted-store-lanes-keys-and-the-journal)): it may persist a display derivative or the already-authenticated received media, but **only app-encrypted**. V1 may cache authenticated stills as encrypted display JPEGs. Authenticated received video MAY persist only as an app-encrypted display blob under the rules below; clear playback files remain session-only per §8.10.1.
 
 **Same posture as §8.8.** One **display blob** (`<blobid>.display.enc`) and one **sidecar** (`<blobid>.meta.enc`, AES-256-GCM under a device cache store key, holding the wrapped content key, the blob ref, `cachedAt` / `expiresAt` / `lastReadAt`, the publication id, media kind after local authenticated decrypt, and a relay CAS version fingerprint) per entry. A still display blob may be a ~1024px JPEG; a video display blob may be the complete authenticated MOV or received envelope, but it MUST remain sealed under a fresh local per-file content key whenever it persists. No persistent cache entry is a clear MOV. Blobs are written `NSFileProtectionComplete`, inside the app container, excluded from backup; the sidecar is the commit marker (blob first, sidecar last, atomic rename). Destruction is the same key-first crypto-shred: delete the sidecar (the only wrapped-key copy) first, then the blob, and verify both are gone — a survivor fails loud, never silently.
 
@@ -1078,7 +1078,7 @@ The Stream's receive feed decrypts each incoming publication to display it. Hold
 
 #### 8.10.1 Session-only clear playback files
 
-Some iOS playback APIs require a seekable clear file rather than a frame stream. V1 admits no Stream video and therefore creates no clear playback file. If a later protocol version passes §11.2.1's whole-file measurement/schema gate, it MAY create this narrow exception for **already-obscured received video**, never for an unobscured source original: one clear MOV solely for the lifetime of an active playback surface, under all of the following rules.
+Some iOS playback APIs require a seekable clear file rather than a frame stream. For §11.2.1-accepted whole-file Stream video, the client MAY create this narrow exception for **already-obscured received video**, never for an unobscured source original: one clear MOV solely for the lifetime of an active playback surface, under all of the following rules.
 
 1. **Dedicated protected directory.** Clear playback files live only in a dedicated playback-staging directory inside the app container, with `NSFileProtectionComplete`, backup exclusion, no filename extension or user-derived filename, and no handoff to QuickLook, a share sheet, thumbnail service, or any API that may make another copy. The directory is never a cache and is never indexed as durable Stream state.
 2. **Authenticate before materialise.** The client MUST download the complete measured-and-accepted video envelope, authenticate the one whole-MOV AEAD and compare its envelope context with the relay row ([section 11.2.1](#1121-versioned-authenticated-envelope-and-aad)) before writing any clear playback file. It MUST NOT play unauthenticated partial bytes.
@@ -1395,7 +1395,7 @@ The relay is **content-blind, not metadata-blind**. It stores authenticated medi
 
 **V1 withdrawal is provisionally STOP-only.** A guardian withdrawal advances the server-visible revoked epoch and the delivery gate denies every affected publication from that point forward. V1 has no `fetch_for_reblur`, no `republish_stream_blob`, no predecessor/successor state, and no claim that group-key possession proves a monotone pixel edit. The affected publication remains denied until retraction or root expiry; re-enabling consent permits only newly sealed publications. A future verifiable-successor protocol requires a separate reviewed version and is not inferred from this schema.
 
-**Stream moving media is still blocked.** V1 CDDL has no accepted video/Live component or timeline alternative. Video cannot gain one until the physical-iPhone-12 whole-file CryptoKit measurement gate in §11.2.1 passes and a reviewed wire-version decision pins enforceable duration, dimensions, frame-count, encoded-byte, sidecar, app-memory, extension-memory, and latency limits. Live, X11 pre-roll, chunked media, unknown kinds, and flattened substitutes are rejected before `K_blob` mint, upload staging, relay row/object/ticket creation, cache entry, or APNs enqueue.
+**Stream whole-file video is provisionally open under pinned caps.** Founder protocol review on 2026-07-11 amended wire v1 to admit one whole-MOV video component inside the existing envelope ceiling, with the exact constants in §11.2.1. Those caps match the conservative harness profile (`h264-high-720p30-10s-16mib` / ≤1080p / ≤10 s / ≤300 frames / ≤16 MiB) and MUST NOT be raised without a physical iPhone 12/A14 release-build measurement report (raw report + harness revision + device/OS/build ids + report SHA-256) attached to this section. Live aggregates, X11 Stream publication, chunked/range media, unknown kinds, and flattened substitutes remain rejected before `K_blob` mint, upload staging, relay row/object/ticket creation, cache entry, or APNs enqueue.
 
 This feature depends on the separate Stream history epochs of §6.2.2, the authenticated observations produced by the render pass, and the on-device store/Light Table. App-domain entitlement and receive-scope storage remains in the companion data model; this section fixes cryptography, relay-visible data, and fail-closed gates.
 
@@ -1455,7 +1455,7 @@ Crypto-shred discards the `K_blob` wrap and deletes both ciphertext objects. Str
 - `RAW(x)` is the fixed-width byte form required by the field's declared type: `U32`, `U64`, `UUID`, or the exact bytes of a declared fixed-width `bstr` (including 16-byte generation nonce, 32-byte digest/HMAC, and 65-byte X9.63 P-256 public key) or literal label. `LP(B) = U32(byteLength(B)) || B`.
 - `ENCODE(x1, ... xn) = LP(RAW(x1)) || ... || LP(RAW(xn))`. A nested byte string such as `AAD_base` is length-prefixed once as bytes. No field may be omitted, reordered, or double-encoded.
 
-`wire_version` and `stream_epoch_generation` use `U32`; `root_expires_at` and `consent_epoch` use `U64`. `subject_tag_digest = SHA-256(U32(tag_count) || concat(sorted_unique_subject_tags))`, where each tag is a raw 16-byte UUID, lexicographically sorted as unsigned bytes, unique, and `tag_count ≤ 256`. `media_digest = SHA-256(exact_media_component_bytes)`. `sidecar_digest = SHA-256(deterministic_CBOR(observation-sidecar-v1))`.
+`wire_version` and `stream_epoch_generation` use `U32`; `root_expires_at` and `consent_epoch` use `U64`. `subject_tag_digest = SHA-256(U32(tag_count) || concat(sorted_unique_subject_tags))`, where each tag is a raw 16-byte UUID, lexicographically sorted as unsigned bytes, unique, and `tag_count ≤ 256`. `media_digest = SHA-256(exact_media_component_bytes)`. `sidecar_digest = SHA-256(deterministic_CBOR(observation-sidecar-v1 | observation-sidecar-video-v1))`.
 
 The literal domain label is `myclick.stream.publication.v1`. AAD is:
 
@@ -1482,7 +1482,7 @@ Purpose labels are literal UTF-8. Empty AAD, omitted/reordered fields, non-canon
 2. reconstruct the subject digest and `AAD_base` from the expected domain/version plus the delivery record's `world_id`, `click_id`, publication id, publisher account/device ids, immutable root expiry, consent epoch, and complete sorted subject tags;
 3. recover a device-specific recipient wrap for the exact eligible Stream epoch id/generation, validate it against the immutable cohort ledger, derive `K_stream_wrap`, and authenticate/unwrap `K_blob` with `AAD_wrap`;
 4. redeem the short-lived payload ticket through the authenticated object RPC, which reruns the delivery gates immediately before returning bytes; derive `K_payload`, authenticate/decrypt the **complete** payload, and require every manifest context field and subject digest to equal the delivery record byte-for-byte;
-5. enforce the still-only component bounds, compute `media_digest` over the exact embedded media bytes, and require equality with the manifest;
+5. enforce the kind-specific component bounds (still or video), compute `media_digest` over the exact embedded media bytes, and require equality with the manifest;
 6. redeem the sidecar ticket through the same rechecking RPC; derive `K_sidecar`, authenticate/decrypt the complete sidecar with `AAD_sidecar`, require its deterministic-CBOR digest to equal the manifest's `sidecar_digest`, require its `media_digest` to match, and validate every closed-schema semantic; and
 7. only then decode/display pixels, create a local encrypted derivative, build a notification thumbnail, or offer Download.
 
@@ -1490,11 +1490,23 @@ Any unknown/extra/missing field or version, unsupported kind/component, failed t
 
 **No-downgrade/no-flatten pre-row gate.**
 
-1. Wire version 1 accepts only `kind = still`, exactly one JPEG or HEIC component, encoded bytes `1...16,777,216`, encoded width/height each `1...16,384`, one clean aperture/transform, and no auxiliary component. The deterministic-CBOR manifest plaintext and envelope ciphertext are each capped at `16,778,240` bytes (16 MiB media plus a fixed 1 KiB schema allowance).
-2. `video` is **not an accepted v1 CDDL alternative** and is protocol-blocked before `K_blob` mint, upload staging, relay-row creation, fetch-ticket creation, cache entry, or APNs enqueue. CryptoKit's public `AES.GCM.seal/open` `Data` APIs are treated as **one-shot, whole-file operations**; this protocol does not assume incremental GCM or constant memory. There are no guessed duration, resolution, frame-count, byte, or latency caps.
-3. The video gate opens only after a release-build report on the lowest supported physical device (iPhone 12/A14, current minimum OS) pins `MAX_VIDEO_ENCODED_BYTES`, width/height, codec/profile/level, maximum presented-frame count, duration and timescale, payload/sidecar limits, and seal/open timeouts. The harness MUST measure resident-size delta and peak footprint around complete CryptoKit seal **and** open, include ciphertext/plaintext coexistence, file read buffers, malformed and boundary±1 inputs, low-storage conditions, thermal states, and realistic concurrent app pressure, and run at least 100 cold/warm cycles per boundary class with zero jetsam, memory warning, crash, timeout, partial object/row, or unauthenticated materialisation. The chosen cap must keep measured peak operation memory below one half of the lowest same-build jetsam threshold established by a separate allocation probe and must meet a pinned p99 operation timeout. The raw report, harness revision, device/OS/build identifiers, constants, and report SHA-256 require protocol and security review; that review decides whether to amend v1 or mint a new wire version. Until it lands, video remains **BLOCKED**, not "best effort."
-4. Even after app-process video opens, a Notification Service Extension remains generic for video until a separate physical-device extension-memory report pins a safe encrypted-preview bound or a separately reviewed fixed-size encrypted-preview protocol exists. The extension MUST NOT fetch/decrypt a whole MOV merely to discover a poster.
-5. A conforming publisher's typed source-classification gate rejects `live`, X11 pre-roll, chunked/range media, future kinds, auxiliary image/depth tracks, and attempts to extract/flatten/relabel any of them as an accepted still **before key mint or row creation**; no poster-frame escape hatch exists. Live requires one specified atomic aggregate. Chunking requires a new construction with authenticated sequence/offsets, replay and truncation resistance, final component count/length commitment, random-access semantics, and per-chunk/key usage bounds. The relay enforces accepted outer request/wire policy but, because the manifest and media are encrypted, cannot cryptographically prove that a malicious authorised publisher did not feed arbitrary bytes to the still encoder; recipients independently require a complete valid JPEG/HEIC and exact manifest agreement after authentication. That endpoint-verification limit is accepted explicitly, not hidden behind a claim that the blind relay can inspect source kind. Local Live develop remains separate.
+1. Wire version 1 accepts either:
+   - `kind = still`: exactly one JPEG or HEIC component, encoded bytes `1...16,777,216`, encoded width/height each `1...16,384`, one clean aperture/transform, and no auxiliary component; or
+   - `kind = video`: exactly one QuickTime/MOV primary-video component under the pinned video constants below, no auxiliary image/depth/Live aggregate component, and no chunked/range substitute.
+   The deterministic-CBOR manifest plaintext and envelope ciphertext are each capped at `16,778,240` bytes (16 MiB media plus a fixed 1 KiB schema allowance) for both kinds.
+2. CryptoKit's public `AES.GCM.seal/open` `Data` APIs remain **one-shot, whole-file operations**; this protocol does not assume incremental GCM or constant memory. A conforming publisher seals the complete accepted media component once; a conforming recipient authenticates the complete ciphertext before any pixel, audio, clear playback file, or persistent derivative.
+3. **Pinned provisional video constants (founder-approved 2026-07-11; amend-v1 decision).** These are normative production caps, not calibration guesses. Raising any cap requires attaching a physical iPhone 12/A14 release-build whole-file CryptoKit report (resident-size delta and peak around complete seal **and** open; ciphertext/plaintext coexistence; file read buffers; malformed and boundary±1 inputs; low-storage; thermal bands; realistic concurrent pressure; ≥100 cold/warm cycles per boundary class; zero jetsam/memory-warning/crash/timeout/partial object/row/unauthenticated materialisation; peak operation memory below one half of the lowest same-build jetsam threshold; pinned p99 timeout) plus harness revision, device/OS/build ids, and report SHA-256.
+   - `MAX_VIDEO_ENCODED_BYTES = 16,777,216`
+   - encoded width `1...1,920`, encoded height `1...1,080`
+   - codec/profile: `avc1` (H.264 High) or `hvc1` (HEVC Main) only
+   - maximum presented primary-video frames `1...300`
+   - duration rational seconds `ticks/timescale` with `0 < duration ≤ 10` seconds; timescale is a positive unsigned 32-bit integer
+   - payload envelope ciphertext `1...16,778,240` bytes (unchanged)
+   - observation sidecar envelope ciphertext `1...8,912,896` bytes (unchanged); v1 video sidecars carry a whole-clip subject set only
+   - seal and open operation timeout budget: p99 ≤ 30 seconds on the lowest supported device class
+   - Notification Service Extension video fetch/decrypt remains **disabled** until a separate extension-memory report or fixed-size encrypted-preview protocol lands
+4. A Notification Service Extension remains generic for video. The extension MUST NOT fetch/decrypt a whole MOV merely to discover a poster.
+5. A conforming publisher's typed source-classification gate rejects `live`, X11 pre-roll Stream publication, chunked/range media, future kinds, auxiliary image/depth tracks, and attempts to extract/flatten/relabel any of them as an accepted still or plain video **before key mint or row creation**; no poster-frame escape hatch exists. Live requires one specified atomic aggregate. Chunking requires a new construction with authenticated sequence/offsets, replay and truncation resistance, final component count/length commitment, random-access semantics, and per-chunk/key usage bounds. The relay enforces accepted outer request/wire policy but, because the manifest and media are encrypted, cannot cryptographically prove that a malicious authorised publisher did not feed arbitrary bytes to the encoder; recipients independently require a complete valid JPEG/HEIC or playable primary-video MOV and exact manifest agreement after authentication. That endpoint-verification limit is accepted explicitly, not hidden behind a claim that the blind relay can inspect source kind. Local Live develop remains separate from Stream Live publication.
 
 **Clean pre-production v1 break.** There is no deployed Stream compatibility promise. Migration is a destructive, fail-closed sequence: (1) disable every Stream publish/list/fetch/redeem/notification RPC; (2) delete all pre-v1 object ciphertexts, `K_blob` wraps, Stream epoch recipient wraps/cohorts, rows/tombstones, fetch tickets, notification work, and queued APNs jobs; (3) verify those server-side counts and object prefixes are zero; (4) set `minimum_stream_wire_version = 1`; (5) require each client, extension, and App Group to delete old Stream/display/notification caches and persist a completed migration marker before Stream is available; and only then (6) re-enable v1. `world_id` is deployment-wide and MUST NOT be rotated for Stream alone. If preproduction chooses a fresh world for stronger separation, it must destructively erase/rebootstrap **all** world-bound protocol rows, keys, wraps, and caches before any subsystem reopens; otherwise the existing world remains and the verified Stream wipe plus version floor provides the break. Any residual Stream row/object/wrap, failed local deletion, absent marker, or cross-world artifact keeps Stream disabled. V1 parsers reject every legacy/untagged object. There is no heuristic kind sniffing, legacy-AAD attempt, filename/MIME fallback, permissive unknown-field parser, or "try old parser" path.
 
@@ -1521,10 +1533,13 @@ cursor256 = bstr .size 32
 norm16 = 0..65535
 mask-run-v1 = 0..65536
 orientation = 1..8
-still-kind-v1 = 0
+media-kind-v1 = 0 / 1         ; still / video
+still-kind-v1 = 0             ; retained alias for still-only records
+video-kind-v1 = 1
 state-v1 = 0 / 1              ; live / shredded
 verdict-v1 = 0 / 1            ; keep / obscure
 codec-still-v1 = 0 / 1        ; jpeg / heic
+codec-video-v1 = 0 / 1        ; avc1 / hvc1
 recipe-id-v1 = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8
                                 ; keep / gaussian / mosaic-square /
                                 ; mosaic-hex / mosaic-crystal /
@@ -1679,9 +1694,50 @@ still-component-v1 = {
   7: affine-v1                 ; encoded source -> upright clean aperture
 }
 
+video-component-v1 = {
+  0: video-kind-v1,
+  1: bstr .size (1..16777216), ; exact QuickTime/MOV bytes
+  2: 1..1920,                  ; encoded width
+  3: 1..1080,                  ; encoded height
+  4: codec-video-v1,
+  5: 1..4294967295,            ; timescale
+  6: 1..4294967295,            ; duration ticks; duration/timescale <= 10 s
+  7: 1..300,                   ; presented primary-video frame count
+  8: bool                      ; audio track present
+}
+
+subject-observation-video-v1 = {
+  0: 0..255,                   ; index into subject-tags-v1
+  1: verdict-v1,
+  2: recipe-v1,
+  3: norm-rect-v1              ; whole-clip upright subject region
+}
+
+component-observation-video-v1 = {
+  0: 0,                        ; component ordinal
+  1: video-kind-v1,
+  2: 1..4294967295,            ; timescale
+  3: 1..4294967295,            ; duration ticks
+  4: 1..300,                   ; presented frame count
+  5: codec-video-v1,
+  6: 1..1920,                  ; width
+  7: 1..1080,                  ; height
+  8: [*256 subject-observation-video-v1]
+}
+
+observation-sidecar-video-v1 = {
+  0: 1,                        ; sidecar_version
+  1: sha256,                   ; media_digest
+  2: bstr .size 16,            ; fresh publication-local generation nonce
+  3: sha256,                   ; local render/generation-record digest
+  4: component-observation-video-v1
+}
+
+media-component-v1 = still-component-v1 / video-component-v1
+
 media-manifest-v1 = {
   0: 1,                        ; schema_version
-  1: still-kind-v1,
+  1: media-kind-v1,
   2: uuid,                     ; world_id
   3: uuid,                     ; click_id
   4: uuid,                     ; client_publication_id
@@ -1692,7 +1748,7 @@ media-manifest-v1 = {
   9: sha256,                   ; subject_tag_digest
   10: sha256,                  ; media_digest
   11: sha256,                  ; sidecar_digest
-  12: still-component-v1
+  12: media-component-v1
 }
 
 publish-stream-request-v1 = {
@@ -1900,8 +1956,8 @@ Normative semantic constraints supplement CDDL:
 - **Minimised subject set.** Subject tags are the complete set of people who are (a) recognised, (b) members of the one target Click selected for this publication, and (c) returned `distribute = true` by the fresh primary consent read at seal. They are sorted, unique, and limited to 256. A sharing-off, unknown, stale/failed-consent-read, or other-Click person is obscured in the media but receives **no tag and no sidecar record**. An empty set is `[]`, never `null`. Because the relay cannot inspect pixels, completeness against a malicious authorised publisher is an endpoint-behaviour promise, not a zero-knowledge proof; the accepted malicious-endpoint limit remains.
 - **No cross-item sidecar identity.** The sidecar contains exactly one `subject-observation-still-v1` per tag, ordered by strictly increasing zero-based index into this publication's sorted `subject-tags-v1`; no index is missing, duplicated, or out of range. It contains no `person_id`, account/device id, track id, pocket id, source id, asset id, predecessor, successor, or identifier reusable in another item. The 16-byte generation nonce and any non-zero 16-byte recipe seed are CSPRNG-generated fresh per publication and MUST NOT encode another identifier; a detected local collision is regenerated before seal.
 - **Forbidden observation content.** Embeddings, face/appearance descriptors, landmarks, feature vectors, crops, thumbnails, pixels, depth, audio samples or features, transcripts, names, locations, unknown-person records, and cross-publication linkage are forbidden in sidecar plaintext. The row's subject tags remain pseudonymous server-visible metadata and are accounted separately in §11.18.
-- **Time and rational encoding.** Row/manifest expiry, upload, and ticket times are unsigned 64-bit whole Unix seconds UTC; no float, locale date, implicit zone, leap-second spelling, or fractional wall time is accepted. Media time is always integer ticks plus an explicit positive unsigned 32-bit timescale, with rational seconds defined exactly as `ticks / timescale`; implementations compare widened integer cross-products rather than floating point. A v1 still has exactly one component and exactly one frame observation per tagged subject: component ordinal/kind/timescale/duration are `0/0/1/0`, and frame ordinal/PTS/duration are `0/0/0`. No media clock epoch or wall time is implied. V1 defines **no accepted video timestamp record**. A future measured video version MUST add bounded frame count and exact signed PTS/sample-duration fields in the declared track timescale, require decoded presentation order with ordinals `0...N-1` and no gaps, represent absence explicitly for every subject/frame, and reject sparse/interpolated timelines; those bounds cannot be populated until the §11.2.1 gate passes.
-- **Motion-sidecar gate.** No motion-sidecar record is an accepted v1 CDDL alternative, so any attempt to submit one is an unknown-kind failure before row creation. A version that opens the measured video gate MUST add closed component/subject/frame maps with: component ordinal (`u16`); timescale (`u32`, `1...1,000,000`); total duration ticks (`u64`); measured-bounded frame count (`u32`); the exact clean aperture, EXIF/track orientation, and signed-16.16 source→upright-output affine types above; per-subject verdict plus effective recipe/renderer version; and, for every presented frame, zero-based contiguous ordinal (`u32`), PTS ticks (`i64`), positive sample-duration ticks (`u32`), normalised box, bounded `mask-rle-v1`, and explicit present/absent state. PTS must be nondecreasing in decoded presentation order and each `PTS + duration` must fit signed 64-bit and the component duration. Only the publication's recognised/distributable subject indices may occur; all §11.2.2 forbidden observation content and §11.3 generation/reconciliation/deletion rules apply unchanged. The accepted map keys, measured maxima, sidecar byte cap, and new containing-record/wire version must land together; until then motion publication remains blocked.
+- **Time and rational encoding.** Row/manifest expiry, upload, and ticket times are unsigned 64-bit whole Unix seconds UTC; no float, locale date, implicit zone, leap-second spelling, or fractional wall time is accepted. Media time is always integer ticks plus an explicit positive unsigned 32-bit timescale, with rational seconds defined exactly as `ticks / timescale`; implementations compare widened integer cross-products rather than floating point. A v1 still has exactly one component and exactly one frame observation per tagged subject: component ordinal/kind/timescale/duration are `0/0/1/0`, and frame ordinal/PTS/duration are `0/0/0`. No media clock epoch or wall time is implied. V1 video pins duration as `ticks/timescale` plus presented-frame count on the component and whole-clip subject regions on the sidecar. A later wire version MAY add per-frame signed PTS/sample-duration fields with ordinals `0...N-1` and no gaps; until then recipients MUST NOT invent sparse/interpolated subject timelines.
+- **Motion-sidecar gate.** V1 video admits `observation-sidecar-video-v1` with whole-clip subject regions only (no per-frame PTS map). A later wire version MAY add closed per-frame maps with: component ordinal (`u16`); timescale (`u32`, `1...1,000,000`); total duration ticks (`u64`); measured-bounded frame count (`u32`); the exact clean aperture, EXIF/track orientation, and signed-16.16 source→upright-output affine types above; per-subject verdict plus effective recipe/renderer version; and, for every presented frame, zero-based contiguous ordinal (`u32`), PTS ticks (`i64`), positive sample-duration ticks (`u32`), normalised box, bounded `mask-rle-v1`, and explicit present/absent state. PTS must be nondecreasing in decoded presentation order and each `PTS + duration` must fit signed 64-bit and the component duration. Only the publication's recognised/distributable subject indices may occur; all §11.2.2 forbidden observation content and §11.3 generation/reconciliation/deletion rules apply unchanged. Until that later version lands, publishers MUST NOT emit per-frame motion maps; whole-clip video under the pinned §11.2.1 caps remains the only accepted moving-media publication.
 - **Transforms.** `pixel-rect-v1` is `(x,y,w,h)` in signed 16.16 encoded-source pixels (`value / 65536`), with `x,y >= 0`, `w,h > 0`, and the rectangle wholly inside encoded dimensions. `orientation` is the EXIF 1...8 transform. `affine-v1` is the canonical composition from encoded-source coordinates through clean-aperture translation and EXIF orientation into upright clean-aperture pixel coordinates, with coefficients in signed 16.16 and intermediate validation in signed 64-bit arithmetic. The still component and sidecar carry byte-identical aperture/orientation/affine values. Non-invertible, overflowing, out-of-bounds, non-canonical, or decoded-media-disagreeing transforms reject the item.
 - **Boxes and masks.** A normalised box uses the upright clean-aperture coordinate system, origin upper-left, x right, y down; `0` maps to the first edge and `65535` to the opposite edge. Width/height MUST be non-zero, and widened arithmetic MUST prove `x+w <= 65535` and `y+h <= 65535`. Every subject has a mandatory mask. Its binary grid covers that box, samples cell centres, and maps to output by nearest-neighbour coverage before clipping to the box. Bits are flattened row-major, left-to-right then top-to-bottom. Runs start with background/zero, alternate zero/one, permit a zero-length run only in the first position, contain at most 8,192 entries, and sum exactly to `width × height <= 65,536`; the 65,536-cell all-zero/all-one case is therefore encodable. If a generated mask exceeds the run bound, any simplification/downsample MUST be coverage-monotone (it may add foreground coverage but never remove it); otherwise publication fails before seal.
 - **Recipe/version.** `recipe_id` is the exact v1 registry above. `renderer_version` is non-zero and must be installed/recognised; unknown versions reject. Parameters record the **effective applied values**, not user defaults: Q0.16 anonymity floor, mosaic blocks across, smoothing/radius ratio, registered glyph, publication-local 128-bit seed, and sticker base recipe. Irrelevant fields MUST be zero/the 16-byte all-zero string/`keep`; `keep` requires verdict `keep` and all-zero parameters; a registered randomised recipe requires a non-zero fresh seed; `obscure` requires a non-`keep` recipe, and `sticker` requires a non-sticker obscuring base. The effective values MUST meet the registered renderer version's anonymity floor. This record supports audit; it is not a deterministic pixel replay guarantee, a proof of monotone editing, or authority for a successor.
@@ -1924,7 +1980,7 @@ The authenticated publish RPC atomically admits one payload envelope, one mandat
 4. **Recipient custody.** A recipient authenticates the complete payload and sidecar before any materialisation. If cached, both live only inside the local device-key-encrypted Stream item and share its withdrawal/retract/expiry lifecycle. No plaintext sidecar file or database is permitted.
 5. **No proof inflation.** Recipe/version/geometry records what the honest renderer applied. It is not a biometric, pixel replay recipe, publisher signature, or proof that a later edit is monotone. V1 therefore accepts no successor.
 
-**Neutral relay object.** Internal upload/storage/fetch uses `Content-Type: application/octet-stream`; `Content-Disposition` and storage references carry no filename, extension, or kind directory. List/delivery records and APNs payloads expose no media kind, MIME, dimensions, duration, codec, recipe, region, or Live component count. The accepted outer wire version is still-only but does not encode a media kind field. Authorised recipients learn kind only after payload authentication. Object lengths, timing, ids, and traffic remain visible and inferentially useful.
+**Neutral relay object.** Internal upload/storage/fetch uses `Content-Type: application/octet-stream`; `Content-Disposition` and storage references carry no filename, extension, or kind directory. List/delivery records and APNs payloads expose no media kind, MIME, dimensions, duration, codec, recipe, region, or Live component count. The accepted outer wire version admits still and capped whole-file video but does not encode a media kind field on list/delivery/APNs surfaces. Authorised recipients learn kind only after payload authentication. Object lengths, timing, ids, and traffic remain visible and inferentially useful.
 
 ### 11.4 The delivery gate (server-blind)
 
@@ -1935,7 +1991,7 @@ Every delivery attempt — app, Notification Service Extension, or cache refill 
 3. **Active entitlement and receive scope:** source-agnostic entitlement is active and just-mine/everything rules admit the row's subject-tag set.
 4. **Liveness and expiry:** `state = live`, wrap/objects are present, and `now < root_expires_at`.
 5. **Standing withdrawal:** no tagged subject has `revoked_epoch > row.consent_epoch`; a never-withdrawn subject has epoch `0`.
-6. **Version/capability:** wire/world/key versions are supported and the row was admitted by the current still-only pre-row policy.
+6. **Version/capability:** wire/world/key versions are supported and the row was admitted by the current still-or-capped-video pre-row policy.
 
 Each ticket is account/device/blob/object-kind/row-version/purpose-bound, single-use, and redeemable only through `redeem_stream_object` under the same device session and purpose policy. Redemption reruns all six gates immediately before returning the complete opaque envelope; a withdrawal or removal between ticket mint and redemption therefore denies it. Possession of an expired/replayed ticket, old APNs identifier, Click/group/epoch key, cached row, or internal object reference never substitutes. No raw bucket URL is exposed. Any fetch or redemption failure returns no wrap, ticket, object reference, or media/sidecar byte; the caller shows generic/denied state and performs no materialisation.
 
@@ -1991,7 +2047,7 @@ Per-row mutation state is `(version, state, stream_epoch_id, stream_epoch_genera
 
 | Mutation | CAS precondition | Effect on success |
 |----------|------------------|-------------------|
-| **Publish** | batch/publication ids unused; still-only pre-row gate passes; publisher ids equal auth context; root expiry valid; consent primary-read/current counter match; expected Stream epoch/generation and GroupKeyVersion are current; complete objects/wrap present | atomically admit one complete `live`, `version = 0` row |
+| **Publish** | batch/publication ids unused; still-or-capped-video pre-row gate passes; publisher ids equal auth context; root expiry valid; consent primary-read/current counter match; expected Stream epoch/generation and GroupKeyVersion are current; complete objects/wrap present | atomically admit one complete `live`, `version = 0` row |
 | **Retract** ([section 11.8](#118-instant-landing-retraction-and-recall-while-viewing), publisher-gated) | `state = live` ∧ `version = expected` | `state → shredded`, `version++`, `stream-key-wrap` nulled, envelope + sidecar objects deleted |
 | **Admin moderation retract** ([section 11.10](#1110-stream-epoch-re-wrap-principal-and-orphaned-publishers), `is_admin`-gated, **shred-only**) | `state = live` ∧ `version = expected` | `state → shredded`, `version++`, `stream-key-wrap` nulled, envelope + sidecar objects deleted — an admin removes the publication and never rewrites its pixels |
 | **Root-expiry shred** | `state = live` ∧ `now ≥ root_expires_at` | terminal shred as above |
@@ -2097,7 +2153,7 @@ AES-GCM hides content, not length. No size padding, sealed sender, cover traffic
 
 ## 12. Notification and live delivery
 
-Section 12 defines one exact APNs doorbell used for arrival and revocation wake, plus a measurement-gated still-thumbnail path. APNs receives no media, name, key, URL, fetch ticket, storage locator, count, or media descriptor, but Apple and the relay do see sensitive routing tokens, delivery timing, generic mutable content, and opaque publication/Click ids. V1 Stream is still-only; moving-media notification fetch/decrypt remains disabled.
+Section 12 defines one exact APNs doorbell used for arrival and revocation wake, plus a measurement-gated still-thumbnail path. APNs receives no media, name, key, URL, fetch ticket, storage locator, count, or media descriptor, but Apple and the relay do see sensitive routing tokens, delivery timing, generic mutable content, and opaque publication/Click ids. V1 Stream admits stills and capped whole-file video in the app process; moving-media notification fetch/decrypt remains disabled.
 
 A Notification Service Extension cannot use the app-only identity key directly. If rich still notifications are enabled, the app may maintain a file-protected, backup-excluded App Group cache of only those Stream epoch keys the account/device is already eligible to hold, each wrapped under a device-local notification keypair. This local cache is an additional at-rest artifact and does not alter §6.2.2 history eligibility.
 
@@ -2170,7 +2226,7 @@ These are the things we have deliberately deferred or not yet pinned down. We li
 
 **Protocol blockers and provisional decisions**
 
-- **Stream video remains blocked on physical measurement and schema review.** The exact iPhone 12/A14 whole-file CryptoKit seal/open, memory/jetsam, encoded-byte, dimensions/codec, frame-count, duration/timescale, sidecar, and timeout report gate is §11.2.1. No video row/object/APNs work may exist before it passes. Review of that report decides whether video can amend wire v1 or requires v2; no bound is guessed here.
+- **Stream whole-file video is provisionally open under founder-pinned §11.2.1 caps (2026-07-11).** Raising any cap, admitting Live aggregates, or enabling notification-extension video fetch still requires the physical iPhone 12/A14 measurement report (and, for Live/NSE, their separate constructions). Per-frame video observation sidecars remain a later tightening; v1 video uses whole-clip subject regions only.
 - **Rich still notification thumbnails remain disabled on extension measurement.** The exact lowest-device extension memory/decode/time gate is §12.2. Generic text is the baseline until its constants/report hash receive protocol/security review. Moving-media extension fetch remains disabled even if app-process video later opens, absent its own fixed-size authenticated-preview design and measurement.
 - **STOP-only withdrawal is the normative provisional v1 decision.** No successor RPC/schema/state exists. Successor re-publication remains disabled unless and until a cryptographically verifiable monotone re-obscuring construction is specified, independently reviewed, and introduced through a new wire/RPC version; a product decision alone cannot enable it under this text.
 
