@@ -417,6 +417,7 @@ flowchart LR
         wraps["Wrapped content-keys and group keys"]
         pub["Account public keys"]
         meta["Membership metadata, timestamps, premises polygons, audit log"]
+        email["Account emails (auth layer; admin-readable in a school Click only — 5.9)"]
     end
     subgraph never["What the server never holds"]
         direction TB
@@ -429,7 +430,7 @@ flowchart LR
 
     classDef has fill:#efe,stroke:#8a8,color:#000;
     classDef hasnt fill:#fee,stroke:#a88,color:#000;
-    class ct,wraps,pub,meta has;
+    class ct,wraps,pub,meta,email has;
     class plain,vk,ugk,raw hasnt;
 ```
 
@@ -442,8 +443,11 @@ All of this is either ciphertext the server cannot decrypt, or metadata we have 
 - **Encrypted, already-obscured Stream publications and encrypted observation sidecars.** The relay stores ciphertext for the shared media and its minimised sidecar, plus the pseudonymous routing metadata enumerated in [section 11.18](#1118-metadata-leaks-and-conceded-trust-boundaries). A shared still can intentionally leave recognised, distributable subjects visible to authorised recipients; "obscured" does not mean "contains no face." The server cannot decrypt those pixels or sidecar observations.
 - **Account public keys.** Public by design — that is what "public key" means. The server uses them to verify accounts and to route wrapped group keys.
 - **Membership metadata.** Which accounts are in which Click; each member's role flags (`is_biometrically_enrolled`, `can_capture`, `is_admin`); and the associated timestamps.
+- **Click purpose declarations.** For each Click, the set of publication purposes it declared at creation — up to four opaque enum tokens (`group_stream`, `internal_publication`, `public`, `external`). This is metadata we concede: the server can see *that* a Click declared, say, a public purpose, and therefore something about what the group photographs for. It is not PII — no names, no per-child rows — and the human labels resolve only on an entitled device.
 - **Premises definitions.** The geofence polygons attached to each Click.
 - **The audit log.** Consent events and membership changes — who enrolled whom, who joined or left, when.
+- **Biometric validation receipts.** For each identity validation: the person's id, the validating account, the Click they validated under, a timestamp, the decision (`verified` / `not_confirmed`), and a coarse confidence bucket. **Metadata only** — no image, no sample, no embedding, and no raw similarity score; the comparison itself happened on the validator's device and the sample was zeroed ([section 7.14](#714-biometric-identity-validation-on-device-ephemeral-sample-metadata-only-receipt)).
+- **The account email — in the auth layer only, and readable by an admin in one named case.** Every account authenticates against a confirmed email (§3, ADR-0017); the server necessarily holds it, and always has. It is **not** stored in the application schema, and the RPC surface does not read it — with exactly one enumerated exception, [section 5.9](#59-the-account-email-is-auth-layer-only--with-one-named-exception).
 
 ### 5.2 What the server never holds
 
@@ -494,6 +498,8 @@ Two consequences recorded honestly. First, the pending-member path assumes — i
 
 **AEAD mode pinned (was an inference in client code).** Every symmetric field-seal named in this section — the self name (vault key), each co-member / inviter name (group key), each person and Click name (content key / group key) — uses **AES-256-GCM**, and the seal-to-identity-public-key path (the pending name) uses **ECIES over P-256** (ephemeral ECDH → HKDF-SHA256 → AES-256-GCM), exactly as fixed in §3 (lines on AEAD mode and asymmetric wrap). This restates, at the name-seal site, the primitive the client implements, so the mode is a PROTOCOL literal here and not left to be re-derived from the code.
 
+**Structured names (first name + surname).** A person's name — and the account holder's — is stored as **two independent ciphertexts**, not one blob: an admin of a 300-child Click cannot tell five Sallys apart on a first name alone. This changes the *shape* of the name at rest, not its protection, and introduces **no new key material**: each field is sealed under exactly the key its single-blob predecessor already used — a person's first name and surname under that **person's content key** (alongside their templates, display name, and age band, sealed at the same instant, so the audience is identical), and the account holder's under the **account vault key**. AES-256-GCM throughout, as fixed in §3. The person's pair is therefore readable by exactly the audience that can already recognise them (the owner via their vault wrap; a Click member via the `.group` wrap) — and, being **content-key** and **vault-key** bound rather than group-key bound, the pair carries **no new rotation obligation**: §6.4 re-seals the content-key *wrap*, never the name bytes. The legacy single-blob display name is retained for back-compat and holds the combined "first surname". A person is captured **once at the family Click** and inherited by every other Click through that one row, so a surname corrected on the family record propagates with nothing re-distributed. The surname is **optional** — absent means absent, never an encrypted empty string.
+
 ### 5.7 The per-account Clicks read returns two server-blind roster counts
 
 The per-account Clicks read (the app-domain `list_my_clicks`) — the read that returns the calling account's Click memberships — additionally returns, **per Click**, two integer counts:
@@ -504,6 +510,36 @@ The per-account Clicks read (the app-domain `list_my_clicks`) — the read that 
 Both are counts over **opt-in association metadata only** — the `(person_id, click_id)` opt-in associations the server already holds to enforce sharing. They expose **no key material, no ciphertext, no biometric template, and no name**: a count is an integer, not a roster. Counting an association the server already stores introduces **no new server knowledge** — the server can already see that a `(person_id, click_id)` association exists ([section 5.1](#51-what-the-server-holds), membership metadata), so aggregating those existing rows into a count tells it nothing it could not already derive by counting them itself.
 
 This preserves the server-blind posture exactly as the document already permits elsewhere: it is the same class of low-sensitivity, signal-free count as the per-`(person_id, click_id)` distribution-revoked marker and the per-blob ordering scalars the streaming layer already concedes ([section 11.18](#1118-metadata-leaks-and-conceded-trust-boundaries)). The privacy floor is unchanged — the server still holds only ciphertext and metadata it already conceded, and the "what we store" list gains nothing readable.
+
+### 5.8 The Click purpose set is declared once and is immutable
+
+A Click declares, at creation, an immutable set drawn from one fixed vocabulary of four independent publication purposes. `group_stream` keeps photos inside myClick's Stream; `internal_publication`, `public` and `external` each let a file leave — that split is the develop/export leak boundary.
+
+The declaration invents no new consent mechanism. It is a *statement of intent* that later gates map onto the two opt-ins that already exist (recognition, and `optin.distribute` for the Stream). There is no per-child purpose row: because the set can never change, every child recognised in the Click accepted the same fixed set, so being recognised in the Click *is* accepting its export purposes as a package.
+
+Immutability is enforced in the database, not by convention: one writer (`create_click`, inside the create transaction) and a trigger that fails loud on any direct update or delete. A cascade from deleting the parent Click is permitted — purposes die with their Click — and is told apart from a direct delete by trigger nesting depth. The consequence is deliberate and worth stating plainly: **a Click cannot gain a purpose it did not declare on day one.** Adding one to a 300-member Click would require re-consenting everyone and fail-closing the new purpose per member until they answered; that machinery should not exist. A changed need is an honest new consent context — which is a new Click. Clicks created before this existed hold an empty set permanently.
+
+### 5.9 The account email is auth-layer-only — with one named exception
+
+The account email is the durable spine of authentication (§3, ADR-0017). The server holds it because it authenticates you; that has never been a secret. Two narrower properties are what matter, and one of them now carries a named exception.
+
+**Unchanged: no contact PII is stored in the application schema.** No email or phone column exists on any application table. There is no roster, no contact store, and no delivery path — myClick cannot send a message to a person, because it does not hold a way to reach them.
+
+**The exception: a school Click's admin may read its members' verified emails.** One enumerated `SECURITY DEFINER` read, `get_click_member_verified_emails`, returns each active member's verified account email to the **admin** of a **school** Click, alongside the children that member guards there. Its purpose is guardian binding: the school pairs its own record *(this email guards this child)* with our verified fact *(this verified-email account controls this child's enrolment)*, and thereby binds a child's opt-in to the guardian it already holds on file. The school matches on its own side; no roster enters myClick and myClick sends nothing.
+
+The exception is bounded, and the bounds are enforced server-side, fail-closed:
+
+- **Admin-gated and school-scoped.** The caller must hold an active admin membership of the Click, and the Click's category must be `school`. Non-members, non-admin members, and admins of **peer** or **family** Clicks are all refused. The family refusal is load-bearing: every account is the admin of its own family Click.
+- **Verified only.** Only a confirmed address is returned; an unconfirmed one is returned as null. The member is still listed — we exclude the address, not the person.
+- **Read-only.** The read persists nothing. Nothing is written to the application schema, so retention of contact data there remains zero.
+- **Fail loud.** Every refusal raises. Unlike the roster and member reads, which return an empty result to an unentitled caller, a refusal here is an explicit error — an empty PII list would be ambiguous.
+- **Disclosed.** A member is told, before it can happen, that a school Click's admin can see their account email and why. This is never silent.
+
+**The email is the only plaintext identifier in the response.** The member's own name and every child's name travel exactly as they do everywhere else — ciphertext sealed under the Click group key and the child's content key (§5.6, §6.3), opened on the admin's device with keys they already hold. The server reads none of them.
+
+**What this concedes, precisely.** Not "the server can now read your email" — it always could (§5.3). The concession is that **another account** — a school admin — can now see it. A disclosure between users is a different kind of thing from a disclosure to the platform, which is why the member-facing disclosure above is mandatory rather than optional. Like every revocation in this protocol, it is **forward-only**: removing an admin stops future reads; it cannot unsee what was seen.
+
+Recorded in ADR-0046. The precedent is ADR-0040, which carved the same shape for the photographer's account email in the provenance stamp: a named, disclosed, purpose-bound email exception for a legitimate accountability need.
 
 ## 6. Per-Click group key (the ratchet)
 
@@ -837,6 +873,31 @@ myClick's default obscure region is **face-focused** (a head cutout following th
 **Consistency.** The single region decision (softened OR melted-stranger ⇒ whole-body; else face-focused) is applied identically across the on-device obscure, depth-of-field, and destination-lens render paths, and the **sealed publish bytes carry the same rule** ([section 11.1](#111-two-obscured-versions-on-the-photographers-device)), so the published copy and the on-screen lens agree.
 
 **Scope.** The decision reads only local softened-render state and face rectangles; embeddings remain in-memory-only and are zeroed after the decision ([section 7.2](#72-the-unconsented-face-invariant-r2)). A Stream publication carries only the already-rendered media and its minimised recipe/region sidecar as ciphertext; no plaintext body mask or geometry is added to relay metadata. The product design is `docs/superpowers/specs/2026-07-07-obscure-styles-and-destination-lenses-design.md` §4.1 (founder-approved 2026-07-08).
+
+### 7.14 Biometric identity validation (on-device, ephemeral sample, metadata-only receipt)
+
+Recognition answers "is this face someone I may keep visible?". **Validation** answers a different question — "is the enrolled fingerprint labelled *Sally* actually Sally?" — using the same machinery. It exists because guardian-email binding proves *who consented*, not *what they enrolled*: a guardian could enrol any face and type any name, and a school acting as controller (POPIA s.34-35 / GDPR Art 8 and the accountability duty) needs better than that.
+
+The property that makes it admissible is that it **compares fingerprints and never reveals a face**.
+
+1. **Sample.** An entitled admin supplies a fresh sample of the child — the school's file photo, or the live child. It is a photo the admin already holds.
+2. **Detect, align, embed.** One face is located, aligned into the canonical space of [section 4.1](#41-the-flow), and embedded by MobileFaceNet — in memory. **Zero or more than one detected face is a refusal, not a heuristic**: with two faces in frame the device cannot say which one it would be vouching for, and guessing is how a wrong child is vouched for.
+3. **Compare.** The sample's embedding is compared **on the admin's device** against that person's already-decrypted roster embeddings, using the section 7.1 matcher held to a **stricter threshold** than the recognition bar. The comparison happens on-device because it cannot happen anywhere else: the server holds no key ([section 5.2](#52-what-the-server-never-holds)) and is structurally incapable of performing or re-deriving it.
+4. **Decide, fail-closed.** Clearing the stricter bar yields `verified`; **everything else** — a borderline near-miss, a different child, a person with no enrolled templates — yields `not_confirmed`. There is no third state and no path to a false green. The single state deliberately reads the same for "visibly someone else" and "could not be sure enough".
+5. **Zero.** The sample's photo and its embedding are zeroed the moment the decision is made — the same discipline as the unconsented-face invariant ([section 7.2](#72-the-unconsented-face-invariant-r2)) and the enrolment zeroing guarantee ([section 4.6](#46-the-zeroing-guarantee)). **No new persistent biometric is created**, on the device or the server. In particular validation writes **no capture sidecar** ([section 4.8](#48-enrolment-capture-sidecars-stored-face-crops)): a sidecar is an artifact of enrolment, and a sample is not an enrolment.
+6. **Receipt.** A **metadata-only** validation record is written. It is a receipt for a comparison that already happened somewhere the server cannot see.
+
+**The stricter bar (V1).** Validation MUST be held to a threshold at least as strict as the recognition threshold, and the tier bars of section 7.1 compose over it by `max` — so a tier may only ever raise the bar for a tagged enrolled template, never lower it below the validation bar. The asymmetry is deliberate: a recognition false-accept keeps one face visible in one photo, whereas a validation false-accept is a school *vouching* for a wrong identity in a durable, delegable record. Recognition is tuned for recall; validation is tuned for precision. **The exact value is bench-calibrated and is not fixed by this document**; the implementation carries a named placeholder pending a labelled bench run.
+
+**No new capability (V2).** Validation grants an admin **no power they did not already hold**. A Click member's device already decrypts roster embeddings to run recognition (that is how a photographer who is not the guardian recognises the kids); validation points that existing capability at a new question. It adds no key, no decryption right, and no access to any child's data, and it cannot render a face because it never decodes one.
+
+**What persists (V3).** The record carries exactly: the person's biometric identity, the validator's account, the Click they acted under, a timestamp, the decision, and a **coarse** confidence bucket. It carries **no image, no sample, no embedding, and no raw similarity score** — the raw cosine is a biometric-derived scalar and stays on the device. The validator's readable name and org are *not* stored: the record holds ids, and the names resolve client-side from the existing server-blind ciphertext ([section 5.6](#56-app-domain-names-are-server-blind-too-including-the-accounts-own-name)). A full dump of the record store reveals that some account vouched for some person id at some time, and nothing about either face.
+
+**Keyed to the biometric (V4).** The record is keyed to the person's biometric identity, **not** to a Click membership: validate once and the status holds everywhere that biometric lives. This is what lets a large organisation delegate the burden of proof to whoever actually recognises each child — Sally in 7B is validated by her 7B teacher, once, and it counts across every Click she is in.
+
+**Honest limits.** A match is a strong *confidence*, not a proof: face comparison is probabilistic and inherits the false-accept/reject risk of [section 4.4](#44-the-false-accept-asymmetry). The copy says "matched to high confidence" and the fail-closed state says "not confirmed". This is school-attested confidence, not identity verification — it does not make myClick an identity authority. And as with section 4.6, source-level review proves the source zeroes the sample; binary-level verification awaits reproducible builds.
+
+*Recorded as ADR-0045 in the myClick working repo.*
 
 ## 8. Capture and import: source-original lifecycle
 
