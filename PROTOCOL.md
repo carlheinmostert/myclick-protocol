@@ -49,6 +49,12 @@ This protocol is being designed in the open. See the commit history for how it e
     - [11.7 Withdrawal: STOP-only in v1](#117-withdrawal-stop-only-in-v1)
     - [11.18 Metadata leaks and conceded trust boundaries](#1118-metadata-leaks-and-conceded-trust-boundaries)
 12. [Notification and live delivery](#12-notification-and-live-delivery)
+    - [12.1 The shipped poke payloads](#121-the-shipped-poke-payloads)
+    - [12.2 On-device assembly in the Notification Service Extension](#122-on-device-assembly-in-the-notification-service-extension)
+      - [12.2.1 The sidecar-free notification open](#1221-the-sidecar-free-notification-open)
+      - [12.2.2 The bounded still decode, and the measurement still owed](#1222-the-bounded-still-decode-and-the-measurement-still-owed)
+      - [12.2.3 Known gap: the cache key carries no world](#1223-known-gap-the-cache-key-carries-no-world)
+    - [12.5 The privacy invariant](#125-the-privacy-invariant)
 13. [Open questions](#13-open-questions)
 
 ---
@@ -1894,6 +1900,8 @@ Purpose labels are literal UTF-8. Empty AAD, omitted/reordered fields, non-canon
 6. redeem the sidecar ticket through the same rechecking RPC; derive `K_sidecar`, authenticate/decrypt the complete sidecar with `AAD_sidecar`, require its deterministic-CBOR digest to equal the manifest's `sidecar_digest`, require its `media_digest` to match, and validate every closed-schema semantic; and
 7. only then decode/display pixels, create a local encrypted derivative, build a notification thumbnail, or offer Download.
 
+**One named carve-out.** The Notification Service Extension omits step 6 — it opens a publication without its observation sidecar and skips the sidecar digest check. That is the only conforming path that may skip a step of this order; it may produce a bounded still thumbnail and nothing else, and every other step, including the complete byte-for-byte manifest context comparison of step 4, applies to it unchanged. The construction, the reason the sidecar cannot ride in an APNs payload, and the residual risk are specified in [section 12.2.1](#1221-the-sidecar-free-notification-open). Every in-app receive path runs the full order.
+
 Any unknown/extra/missing field or version, unsupported kind/component, failed tag, epoch/cohort or GroupKeyVersion mismatch, duplicate/unsorted subject tag, digest mismatch, bound-context mismatch, missing/corrupt sidecar, forbidden null, expired/replayed fetch ticket, or cap violation fails closed: no display, playback, staging file, persistent derivative, Download, notification thumbnail, successor, or fallback parser.
 
 **No-downgrade/no-flatten pre-row gate.**
@@ -2612,72 +2620,109 @@ AES-GCM hides content, not length. No size padding, sealed sender, cover traffic
 
 ## 12. Notification and live delivery
 
-Section 12 defines one exact APNs doorbell used for arrival and revocation wake, plus a measurement-gated still-thumbnail path. APNs receives no media, name, key, URL, fetch ticket, storage locator, count, or media descriptor, but Apple and the relay do see sensitive routing tokens, delivery timing, generic mutable content, and opaque publication/Click ids. V1 Stream admits stills and capped whole-file video in the app process; moving-media notification fetch/decrypt remains disabled.
+Section 12 specifies the APNs doorbells that wake a recipient device on arrival, and the on-device assembly that turns a doorbell into a lock-screen still thumbnail. **This section describes the deployed system, not an aspiration.** The shipped payload is not the minimal content-free doorbell earlier drafts of this section specified: it carries a short-TTL pre-signed object URL, the per-publication transport wrap, the group-key version id, a recent-photo count, and a deep link. §12.1 enumerates exactly what that discloses; §12.5 states what it still does not. APNs receives no media byte, no sidecar byte, no Click/person/event name, **no subject tag, subject count, or face region**, and no thumbnail; the URL and wrap it does carry are inert without the recipient-local key cache. Apple and the relay do see sensitive routing tokens, delivery timing, opaque publication/Click ids, and a count of recent photos. V1 Stream admits stills, capped whole-file video, and the Live aggregate in the app process; the notification extension is structurally confined to stills (§12.2.2).
 
-A Notification Service Extension cannot use the app-only identity key directly. If rich still notifications are enabled, the app may maintain a file-protected, backup-excluded App Group cache of only those Stream epoch keys the account/device is already eligible to hold, each wrapped under a device-local notification keypair. This local cache is an additional at-rest artifact and does not alter §6.2.2 history eligibility.
+A Notification Service Extension cannot use the app-only identity key. The recipient device therefore maintains a backup-excluded App Group cache of only those Click group keys the account/device is already eligible to hold, each wrapped under a device-local notification keypair in a shared keychain access group ([ADR-0030](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0030-notification-crypto-bridge-cached-group-key.md)). That cache is an additional at-rest artifact and does not alter §6.2.2 history eligibility. Its protection class is **`NSFileProtectionCompleteUntilFirstUserAuthentication`**, not `NSFileProtectionComplete`: an extension woken while the device is locked cannot read a `Complete`-protected file, so `Complete` would make the rich path unreachable in exactly the case it exists for. The honest posture is therefore "unreadable until the first unlock after boot", not "unreadable whenever locked". The same class is used for the assembled thumbnail attachment file, for the same reason.
 
-### 12.1 The closed generic mutable-content poke
+### 12.1 The shipped poke payloads
 
-Arrival and revocation wake use the same closed v1 application payload. UUIDs are lowercase canonical hyphenated strings; missing or extra application keys are rejected by the extension:
+Three application payloads exist. All three are built in `buildStreamPokePayload` / `buildSilentStreamPokePayload` / `buildStreamLiveActivityUpdatePayload` and dispatched by the `send-stream-notifications` edge function after `claim_stream_notification_deliveries` has claimed the outbox row.
+
+**The alert poke** (`apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: 0`):
 
 ```json
 {
   "aps": {
     "mutable-content": 1,
-    "alert": {
-      "title": "myClick",
-      "body": "New activity in myClick"
-    }
+    "alert": { "title": "New photos", "body": "<count> new" },
+    "sound": "default"
   },
   "blob_id": "<opaque UUID>",
-  "click_id": "<opaque UUID>"
+  "click_id": "<opaque UUID>",
+  "signed_url": "<pre-signed R2 GET, 300 s TTL>",
+  "wrapped_blob_key": "<base64 stream-envelope-v1 transport wrap>",
+  "gkv_id": "<opaque group-key version UUID>",
+  "count": <recent photo count>,
+  "deep_link": "myclick://stream?click_id=...&blob_id=..."
 }
 ```
 
-No other application field or alternate silent variant is allowed. In particular APNs MUST NOT carry a protocol/event id, signed URL, raw/internal storage reference, fetch ticket, bearer capability, `K_blob` or epoch wrap, Stream/group-key version, nonce/tag, subject id/count, publication count, publisher id, expiry/consent/revoked epoch, cursor, media kind/MIME/extension/dimensions/duration/codec/Live count, Click/person/event name, thumbnail, face region, withdrawal fact, or live-window hint. `blob_id`/`click_id` are pseudonymous correlators, not authority. A delayed, replayed, or fabricated pair can at most trigger authenticated RPCs; it cannot fetch or shred media by itself.
+**The silent burst wake** ([ADR-0029](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0029-live-photo-notifications-stream.md); `apns-push-type: background`, `apns-priority: 5`) carries `"aps": { "content-available": 1 }` and the identical seven application fields. It is sent only when a Live Activity has taken over the visible surface, so that the app can stage obscured thumbnails without a banner.
+
+**The Live Activity payload** (`apns-push-type: liveactivity`, topic `<bundle-id>.push-type.liveactivity`) carries an ActivityKit `content-state` of `{ photoCount, clickName: "", showThumbnail: false, recentBlobIDs: [] }` plus `click_id`, `blob_id`, `gkv_id` and `count`. The push-to-start variant additionally carries `attributes-type`, `attributes: { clickID }`, and a visible `alert` (ActivityKit silently drops a start event without one). **The server never populates `clickName`, `showThumbnail`, or `recentBlobIDs`** — those are content-state slots the recipient app fills locally from its own decrypted state; the wire value is always empty.
+
+**What this discloses to APNs, stated plainly.** Beyond the routing metadata of §12.4: that the account received photos, how many recent ones, an opaque `blob_id`/`click_id` pair, an opaque `gkv_id`, a five-minute bearer capability to one ciphertext object, and the AEAD-authenticated transport wrap for that object. The URL yields ciphertext only; the wrap yields `K_blob` only under the recipient-local cached group key, which exists on no Apple or relay system. Deviations from the earlier closed-doorbell text are recorded here rather than hidden:
+
+- `signed_url` and `wrapped_blob_key` are **authorised deviations**, recorded in [ADR-0030 §2.4](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0030-notification-crypto-bridge-cached-group-key.md): entitlement moves from fetch time to **send time** (the relay addresses the poke, and mints the URL, only to members §11.4 already authorises), and neither field is usable without the cached group key.
+- `gkv_id`, `count`, `deep_link`, the `sound` field, the non-generic alert copy, and the existence of the silent and Live Activity variants were **undocumented drift**. They are specified here now. `gkv_id` selects the cache entry; `count` drives the banner copy and the Live Activity tick; `deep_link` restates `click_id` and `blob_id` in a URL and discloses nothing further.
+- The alert copy is **not generic**. `"New photos"` / `"<count> new"` names the media type and carries a count on the wire. This is a real disclosure to APNs and is accepted, not concealed. It is bounded to *photo count*: it is **not** a subject count, and §12.5's subject-count invariant is unaffected.
+
+What APNs still MUST NOT carry is unchanged and load-bearing: no media or sidecar byte, no thumbnail, no face region, no subject id, **no subject tag or subject-count signal of any kind (including a sidecar or any length-correlated proxy for one)**, no Click/person/event name, no `K_blob` or epoch key, no biometric group key, no Stream epoch id or generation, no nonce/tag, no publisher id, no expiry/consent/revoked epoch, no cursor, no media kind/MIME/dimensions/duration/codec/Live count, and no withdrawal fact. A delayed, replayed, or fabricated poke can at most cause a ciphertext GET that fails to open; it cannot shred, and it cannot produce pixels on a device that does not already hold the group key.
 
 ### 12.2 On-device assembly in the Notification Service Extension
 
-The app may mint a device-local P-256 notification keypair in a shared keychain group. Its private key never leaves the device. The app-only writer may cache entries keyed by `(world_id, click_id, stream_epoch_id, stream_epoch_generation)` containing only an **already-eligible Stream epoch key** wrapped to the notification public key. The App Group container is `NSFileProtectionComplete` and backup-excluded. Admission never backfills an old epoch into this cache.
+The app mints a device-local P-256 notification keypair in a shared keychain access group; its private key never leaves the device. The app — the only writer — caches entries keyed by `(click_id, group_key_version_id)` holding the eligible Click group key wrapped to the notification public key, plus the group-key-encrypted Click name. Admission never backfills an old epoch into this cache. **The cache key does not currently include `world_id`** (§12.2.3).
 
-For every poke, including one sent to prompt revocation reconciliation, the extension performs this order:
+For every alert poke the extension performs this order:
 
-1. Parse the one closed schema. Missing/extra/malformed ids produce the exact generic alert and stop.
-2. Schedule authenticated `fetch_revocations(since_cursor)` independently of the named blob and rich-media policy. Only that response may shred; failure leaves the cursor unchanged and falls back to later reconcile.
-3. Call authenticated `fetch_stream_blob_ciphertext(blob_id, click_id, purpose = notification)` **at processing time for every well-formed poke**, even while rich notifications are disabled. The server requires and atomically consumes the matching unexpired notification-work row created before this APNs enqueue, then reruns every §11.4 gate. Missing/consumed work, authentication, membership, history eligibility, entitlement, scope, liveness, expiry, withdrawal, version, or capability failure returns no delivery record, wrap, ticket, reference, or media byte and leaves generic text.
-4. Require the deployment's notification-rich-media policy to be **still-only** and enabled by the measurement gate below. If disabled, discard the gate response, emit generic text, and stop before any object redemption.
-5. Locate the exact eligible epoch/generation cache entry. Missing/locked/stale cache produces generic text and no object redemption.
-6. Only now redeem the two short-lived tickets through the authenticated object RPC, using an ephemeral no-cache network session. Each redemption reruns all gates immediately before returning the bounded complete still envelope or sidecar. Derive/unwrap/authenticate in the full §11.2.1 order and compare every bound field to the delivery record before decoding a pixel. No raw bucket URL, pre-signed locator, or direct CDN capability exists on this path.
-7. Build a bounded still thumbnail in memory with generic text. Any fetch, size, key, tag, digest, schema, context, decode, timeout, or memory failure discards all bytes and leaves the generic alert.
-8. Zero unwrapped epoch/wrap/content keys, plaintext media, and thumbnail working buffers. The extension persists no media, derivative, or playback file.
+1. Parse the payload. `click_id`, `blob_id`, `signed_url`, `wrapped_blob_key` and `gkv_id` are required and must parse; `count` defaults to 1; `deep_link` is not read by the extension. Unrecognised application keys are ignored rather than rejected. A parse failure delivers the generic text of §12.6 and stops.
+2. Locate the cache entry matching `(click_id, gkv_id)` exactly. A missing entry, a missing notification private key, or a failed unwrap delivers generic text and performs **no object fetch**.
+3. Unwrap the Click group key under the notification private key, and decrypt the Click name under it.
+4. GET the pre-signed object URL. **There is no processing-time gate call.** Entitlement was enforced at dispatch (§12.1, ADR-0030 §2.4); the extension redeems a bearer URL rather than a ticket, and there is no `purpose = notification` RPC, no notification-work row consumed at processing time, and no per-fetch gate rerun on this path. This is the largest deviation in §12 from the ticket-redemption order earlier drafts specified, and it is a deliberate consequence of the send-time entitlement model, not an oversight.
+5. Open the `stream-envelope-v1` publication **without its observation sidecar**, per §12.2.1.
+6. Build a bounded still thumbnail in memory (§12.2.2) and attach it. Any fetch, HTTP, size, key, tag, schema, context, decode, timeout, or memory failure discards all bytes and delivers text with no attachment.
+7. Zero the unwrapped keys, the plaintext media and the thumbnail working buffers. The extension persists no media or derivative beyond the single attachment file the notification system requires, which is written `NSFileProtectionCompleteUntilFirstUserAuthentication`.
 
-The rich path defaults **disabled** until a release-build physical-device Notification Service Extension harness on the lowest supported device/OS pins smaller extension-specific encoded-byte/dimension/decoded-working-set/time limits, exercises boundary±1 and malformed images under realistic pressure for at least 100 cold/warm cycles per boundary class, and records zero jetsam, memory warning, crash, timeout, or partial materialisation. Those constants and the report hash require protocol/security review before enablement; generic text is the v1 baseline.
+**Revocation reconciliation is not on this path.** Earlier drafts required the extension to schedule an authenticated `fetch_revocations(since_cursor)` for every poke. No such RPC exists and the extension makes no such call; revocation reconciliation is an app-process concern (§9, §11.7). Nothing in the notification path may shred.
 
-The extension MUST NOT fetch or decrypt a MOV, Live aggregate, X11 media, chunked/future object, or unknown kind. Because direct kind is deliberately hidden from the relay/APNs, enabling any moving-media Stream kind automatically disables this whole-media rich extension path deployment-wide until a fixed-size authenticated preview protocol or separately reviewed kind-hiding bound exists. Generic text remains available.
+#### 12.2.1 The sidecar-free notification open
 
-### 12.3 Live Activity is disabled under the v1 poke
+The notification path opens a publication using **only** the transport wrap and the payload envelope. It derives `K_stream_wrap`, authenticates and unwraps `K_blob` under `AAD_wrap`, derives `K_payload`, authenticates and decrypts the complete payload envelope under `AAD_payload`, and requires every manifest context field — wire version, `world_id`, `click_id`, `client_publication_id`, `publisher_account_id`, `publisher_device_id`, `root_expires_at`, `consent_epoch`, `subject_tag_digest` — to equal the transport binding byte-for-byte before a single media byte is returned. It then renders the media component. It does **not** fetch, derive `K_sidecar` for, decrypt, digest-check, or parse the observation sidecar; step 6 of the §11.2.1 recipient verification order is **skipped on this path and on this path only**.
 
-ActivityKit push-to-start/update payloads require additional APNs fields and state not present in the closed §12.1 schema. V1 therefore sends no live-window hint, count tick, event name, push-to-start token payload, or dynamic Live Activity update. The foreground app may group already-fetched publications locally. Enabling a Live Activity requires a separately reviewed APNs schema and metadata inventory; it may not overload `blob_id`/`click_id` or infer extra fields silently.
+This is a deliberate, bounded weakening, recorded in [ADR-0054](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0054-sidecar-free-notification-open.md). Two facts bound it:
+
+- **The sidecar has no pixel-producing role.** Obscuration is baked into the published pixels before the seal; the sidecar *records* which subjects were obscured, it never *causes* obscuration. A thumbnail assembled without the sidecar is byte-identical to one assembled with it. Skipping it cannot produce an unobscured or differently-obscured image.
+- **The residual is an inconsistency, not a disclosure.** A Click member who already holds `K_blob` could seal a manifest whose `sidecar_digest` names a sidecar that was never uploaded or does not match. The extension would show a thumbnail the in-app Stream then refuses to open, because the full §11.2.1 order fails closed on the sidecar. That is a visible inconsistency for a party who already had the plaintext, not an obscuration bypass and not a leak to anyone new.
+
+The choice was between this and carrying the sidecar in the APNs payload so the extension could run the full order. **The sidecar was refused as a payload field on a measured privacy ground, not on size.** Its serialized length is an almost-exact readout of the recognised-face count in the photo — 173 bytes at zero faces, +82 bytes per face, ±2 bytes of jitter, measured over 22 real staging publications. Carrying it would hand Apple a per-photo face counter, which §12.1 and §12.5 forbid by name, and no envelope encryption removes a length. The full recipient order of §11.2.1 remains normative for every in-app receive path, where the sidecar arrives over the gated fetch and never touches APNs.
+
+#### 12.2.2 The bounded still decode, and the measurement still owed
+
+The rich still path is **enabled** in the shipped deployment. It is bounded **by construction**, not by a measured report: the extension decodes with `CGImageSourceCreateThumbnailAtIndex` at a 360-pixel maximum edge, so peak decoded working set is one 360-pixel surface plus the encoded bytes, independent of the source dimensions. This matters because §11.2.1 admits stills up to 16,384 pixels per edge; a full `UIImage` decode of a maximal admitted still would allocate on the order of a gigabyte against an extension budget commonly cited near 24 MB, and would be killed rather than degraded.
+
+The measurement remains owed and is not discharged by the construction above. A release-build physical-device extension harness on the lowest supported device/OS must pin extension-specific encoded-byte, dimension, decoded-working-set and time limits, exercise boundary±1 and malformed images under realistic pressure for at least 100 cold/warm cycles per boundary class, and record zero jetsam, memory warning, crash, timeout, or partial materialisation. Until that report and its hash pass protocol/security review, the 24 MB figure is a commonly-cited budget rather than a measured one, and the 360-pixel bound may not be raised, no larger derivative may be built in the extension, and no additional decode may be added to this path.
+
+The extension MUST NOT fetch or decrypt a MOV, Live aggregate, X11 media, chunked/future object, or unknown kind. Because direct kind is deliberately hidden from the relay and APNs, this is enforced **structurally** rather than by convention: the crypto surface linked into the extension exposes a still-only open and contains no video or Live decoder at all, so the extension is incapable of opening a moving-media publication even if handed one. A publication whose manifest declares a non-still kind fails closed to generic text. Enabling notification-extension moving media requires a fixed-size authenticated preview protocol or a separately reviewed kind-hiding bound, plus its own measurement report.
+
+#### 12.2.3 Known gap: the cache key carries no world
+
+The App Group cache entry records `click_id` and `group_key_version_id` but **not `world_id`**, so the extension cannot supply an expected world to the open and the §11.2.1 / §2.1 cross-world check is skipped on the notification path. The publication's bound `world_id` is still authenticated against the transport binding and the manifest; what is missing is the comparison against *this client's pinned world*. Concretely: a publication sealed in a different world whose group key collided would open in the extension where the app would reject it ([ADR-0051](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0051-world-id-deployment-singleton-minted-by-relay-pinned-by-client.md)). The gap is independent of §12.2.1 — it is present whether or not the sidecar is carried — and closing it is a purely additive schema change to a cache the app alone writes.
+
+### 12.3 Live Activity is enabled, content-free
+
+Earlier drafts disabled Live Activity outright. It is **deployed** ([ADR-0029](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0029-live-photo-notifications-stream.md) Flavor C): push-to-start and update payloads are dispatched by the same edge function, and per-device ActivityKit tokens are stored server-side. The constraint that replaces the prohibition is that the wire content-state is **content-free**: a photo count and an opaque `click_id`, with the name, thumbnail and blob-id slots always empty on the wire and filled only by the recipient app from state it already holds. The push-to-start alert copy (`"Photos arriving"` / `"<count> new photos"`) discloses the same photo count as §12.1 and nothing more. `blob_id`/`click_id` are not overloaded to smuggle further fields, and any additional content-state field requires a new metadata inventory in this section before it may be sent.
 
 ### 12.4 No server decrypt key; push tokens are sensitive routing metadata
 
-The server holds no notification decrypt key. The device-local notification keypair and wrapped eligible Stream-epoch cache never leave the recipient device. The relay does store per-device APNs tokens, notification preferences, and minimised delivery outcomes; Apple receives the token, app topic, timing, APNs headers, and one closed v1 payload. Tokens and blob/Click ids are **sensitive, linkable routing identifiers** that must be least-privilege access-controlled, encrypted at rest where platform design permits, redacted from application logs/analytics/crash reports, rotated on APNs refresh, and deleted on sign-out/device removal. Delivery logs MUST NOT retain payload bodies or fetch tickets. V1 stores no ActivityKit token because §12.3 is disabled.
+The server holds no notification decrypt key. The device-local notification keypair and the wrapped eligible group-key cache never leave the recipient device. The relay does store per-device APNs tokens, **per-device ActivityKit push-to-start and update tokens** (§12.3), notification preferences, and minimised delivery outcomes; Apple receives the token, app topic, timing, APNs headers, and the payloads of §12.1. Tokens and blob/Click ids are **sensitive, linkable routing identifiers** that must be least-privilege access-controlled, encrypted at rest where platform design permits, redacted from application logs/analytics/crash reports, rotated on APNs refresh, and deleted on sign-out/device removal. Delivery logs MUST NOT retain payload bodies or pre-signed URLs.
 
 ### 12.5 The privacy invariant
 
 The precise invariant is:
 
-- The **APNs service** receives only the closed generic content/identifiers in §12.1 and routing metadata in §12.4. It receives no media/sidecar byte, name, subject tag/count, key/wrap, epoch, URL, fetch ticket, storage reference, or media descriptor.
-- The **relay/object gateway** already stores encrypted obscured media and encrypted observations plus the §11.18 metadata inventory. Notification adds APNs token/preferences, delivery timing/outcome, and ticket issue/redemption events; it gives the relay no decrypt key.
-- The **recipient extension and operating system** necessarily see the locally assembled generic alert and, only after every authenticated gate and cryptographic check, may see the final still thumbnail. Clear keys/media/thumbnail buffers are transient and zeroed.
-- The one new recipient at-rest cryptographic artifact is the file-protected, backup-excluded cache of **eligible Stream epoch keys wrapped under the device-local notification keypair**—never biometric group keys, never old epochs for a later joiner. It is removed on sign-out/device removal and refreshed on eligible epoch rotation.
-- Moving-media notification fetch/decrypt and Live Activity are disabled in v1.
+- The **APNs service** receives the fields enumerated in §12.1 and the routing metadata in §12.4: opaque ids, a recent-photo count, a short-TTL bearer URL to one ciphertext object, and an AEAD wrap. It receives **no media or sidecar byte, no name, no subject tag, no subject count, no face region, no thumbnail, no group or epoch key, and no length-correlated proxy for the number of people in a photo.** This last clause is the one that decided §12.2.1: the observation sidecar is a near-exact face counter by length alone, and it is therefore never a payload field.
+- The **relay/object gateway** already stores encrypted obscured media and encrypted observations plus the §11.18 metadata inventory. Notification adds APNs and ActivityKit tokens, preferences, delivery timing/outcome, and pre-signed URL issue events; it gives the relay no decrypt key. Entitlement for a poke is decided at dispatch by the §11.4 gate, so the relay learns the same recipient set it already computes for delivery.
+- The **recipient extension and operating system** necessarily see the locally assembled alert — including the locally decrypted Click name — and, only after the cache lookup, key unwrap and the full authenticated open of §12.2.1, may see the final still thumbnail. Clear keys, media and thumbnail buffers are transient and zeroed; the one persisted derivative is the attachment file the notification system requires.
+- The recipient at-rest cryptographic artifact is the backup-excluded, until-first-unlock-protected cache of **eligible Click group keys wrapped under the device-local notification keypair** — never biometric material beyond that key, never an epoch a later joiner is not eligible for. It is removed on sign-out/device removal and refreshed on rotation.
+- Moving-media notification fetch and decrypt are disabled, structurally (§12.2.2).
 
-The honest claim is therefore not "Apple sees nothing" or "routing is non-sensitive." It is: **APNs carries no media capability or readable media/name; the relay cannot decrypt; rich content is assembled only on an authorised recipient device after a fresh authenticated gate.**
+The honest claim is therefore not "Apple sees nothing." It is: **APNs learns that photos arrived and how many, and holds a short-lived capability to ciphertext it cannot open; it never learns who is in a photo, how many people are in it, what the Click is called, or what the photo looks like. The relay cannot decrypt. Rich content is assembled only on a device that already legitimately holds the Click group key.**
 
-### 12.6 The fail-safe when the cache is absent
+### 12.6 The fail-safe
 
-Malformed payload, missing authentication, any failed §11.4 gate, locked/missing/stale epoch cache, unsupported deployment policy, timeout, memory pressure, object-fetch error, cap violation, failed authentication/context comparison, decode failure, or extension expiry yields exactly the generic §12.1 text. A gate/cache/policy failure occurs before any media object fetch; a later failure discards fetched ciphertext and produces no thumbnail. Generic copy contains no count, Click/person/event name, or media type.
+Malformed payload, a missing or stale cache entry, a missing notification key, a failed unwrap, an HTTP or transport error on the object fetch, a failed authentication or context comparison, a decode failure, memory pressure, or extension expiry yields a text-only banner and no attachment. A cache or key failure occurs **before** any object fetch; a later failure discards fetched ciphertext and produces no thumbnail. Nothing on this path shreds, and no failure escalates.
+
+The delivered text is not the generic string earlier drafts specified. It is the Click name as title with `"<n> new photos"` as body when the name decrypted, and `"New photos"` with the same body when it did not — so the shipped fallback copy carries a photo count and names the media type, consistent with §12.1. It carries no person or event name, no subject count, and no media descriptor. Development and staging builds append a short diagnostic reason to the body (`#if DEBUG || MYCLICK_STAGING`); that string is compiled out of production builds and is constrained to name the failing branch only — never the pre-signed URL, the wrapped key, or an underlying error description that would carry either.
 
 ## 13. Open questions
 
@@ -2686,7 +2731,8 @@ These are the things we have deliberately deferred or not yet pinned down. We li
 **Protocol blockers and provisional decisions**
 
 - **Stream whole-file video is provisionally open under founder-pinned §11.2.1 caps (2026-07-11).** Raising any cap, admitting Live aggregates, or enabling notification-extension video fetch still requires the physical iPhone 12/A14 measurement report (and, for Live/NSE, their separate constructions). Per-frame video observation sidecars remain a later tightening; v1 video uses whole-clip subject regions only.
-- **Rich still notification thumbnails remain disabled on extension measurement.** The exact lowest-device extension memory/decode/time gate is §12.2. Generic text is the baseline until its constants/report hash receive protocol/security review. Moving-media extension fetch remains disabled even if app-process video later opens, absent its own fixed-size authenticated-preview design and measurement.
+- **Rich still notification thumbnails are enabled and bounded by construction; the lowest-device measurement report is still owed.** The extension decodes at a 360-pixel maximum edge through ImageIO, so peak working set is independent of the admitted 16,384-pixel still bound (§12.2.2). The release-build physical-device extension harness that would pin real extension-specific memory/decode/time constants has **not** been run, and until its constants and report hash pass protocol/security review the bound may not be raised and no further decode may be added to that path. Moving-media extension fetch remains disabled — structurally, by linking a still-only crypto surface into the extension — even though app-process video and Live are open, absent its own fixed-size authenticated-preview design and measurement.
+- **The notification open skips the observation sidecar, and the notification cache key carries no world.** Both are recorded deviations with bounded consequences (§12.2.1, §12.2.3), not open design questions: the sidecar has no pixel-producing role and was refused as an APNs field because its length is a near-exact face counter, and the missing `world_id` is a purely additive fix to an app-written cache. They are listed here so an auditor finds them without reading §12 end to end.
 - **STOP-only withdrawal is the normative provisional v1 decision.** No successor RPC/schema/state exists. Successor re-publication remains disabled unless and until a cryptographically verifiable monotone re-obscuring construction is specified, independently reviewed, and introduced through a new wire/RPC version; a product decision alone cannot enable it under this text.
 
 **Deferred to v2**
