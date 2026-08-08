@@ -424,7 +424,7 @@ flowchart LR
         wraps["Wrapped content-keys and group keys"]
         pub["Account public keys"]
         meta["Membership metadata, timestamps, premises polygons, audit log"]
-        email["Account emails (auth layer; admin-readable in a school Click only — 5.9)"]
+        email["Account emails (auth layer; read by a school Click admin, stored on an Organisation membership — 5.9)"]
     end
     subgraph never["What the server never holds"]
         direction TB
@@ -454,7 +454,7 @@ All of this is either ciphertext the server cannot decrypt, or metadata we have 
 - **Premises definitions.** The geofence polygons attached to each Click.
 - **The audit log.** Consent events and membership changes — who enrolled whom, who joined or left, when.
 - **Biometric validation receipts.** For each identity validation: the person's id, the validating account, the Click they validated under, a timestamp, the decision (`verified` / `not_confirmed`), and a coarse confidence bucket. **Metadata only** — no image, no sample, no embedding, and no raw similarity score; the comparison itself happened on the validator's device and the sample was zeroed ([section 7.14](#714-biometric-identity-validation-on-device-ephemeral-sample-metadata-only-receipt)).
-- **The account email — in the auth layer only, and readable by an admin in one named case.** Every account authenticates against a confirmed email (§3, ADR-0017); the server necessarily holds it, and always has. It is **not** stored in the application schema, and the RPC surface does not read it — with exactly one enumerated exception, [section 5.9](#59-the-account-email-is-auth-layer-only--with-one-named-exception).
+- **The account email — the auth layer's, with two named exceptions.** Every account authenticates against a confirmed email (§3, ADR-0017); the server necessarily holds it, and always has. No Click-scoped table holds a copy. Two enumerated exceptions are the whole of the list: a school Click's admin may **read** its members' verified addresses, persisting nothing; and an Organisation — the server-readable commercial entity of ADR-0055, which sits outside the encryption boundary by design — **stores** the address of each of its own members on the membership row. Both in [section 5.9](#59-the-account-email-is-auth-layer-only--with-two-named-exceptions).
 
 ### 5.2 What the server never holds
 
@@ -526,13 +526,20 @@ The declaration invents no new consent mechanism. It is a *statement of intent* 
 
 Immutability is enforced in the database, not by convention: one writer (`create_click`, inside the create transaction) and a trigger that fails loud on any direct update or delete. A cascade from deleting the parent Click is permitted — purposes die with their Click — and is told apart from a direct delete by trigger nesting depth. The consequence is deliberate and worth stating plainly: **a Click cannot gain a purpose it did not declare on day one.** Adding one to a 300-member Click would require re-consenting everyone and fail-closing the new purpose per member until they answered; that machinery should not exist. A changed need is an honest new consent context — which is a new Click. Clicks created before this existed hold an empty set permanently.
 
-### 5.9 The account email is auth-layer-only — with one named exception
+### 5.9 The account email is auth-layer-only — with two named exceptions
 
-The account email is the durable spine of authentication (§3, ADR-0017). The server holds it because it authenticates you; that has never been a secret. Two narrower properties are what matter, and one of them now carries a named exception.
+The account email is the durable spine of authentication (§3, ADR-0017). The server holds it because it authenticates you; that has never been a secret. Two narrower properties are what matter, and both now carry a named exception: one is a **read**, the other is a **stored copy**.
 
-**Unchanged: no contact PII is stored in the application schema.** No email or phone column exists on any application table. There is no roster, no contact store, and no delivery path — myClick cannot send a message to a person, because it does not hold a way to reach them.
+**No contact PII is stored under the encryption boundary.** No email or phone column exists on any Click-scoped table. No Click holds a roster, a contact store, or a delivery path, and nothing in the recognition or publication path can reach one.
 
-**The exception: a school Click's admin may read its members' verified emails.** One enumerated `SECURITY DEFINER` read, `get_click_member_verified_emails`, returns each active member's verified account email to the **admin** of a **school** Click, alongside the children that member guards there. Its purpose is guardian binding: the school pairs its own record *(this email guards this child)* with our verified fact *(this verified-email account controls this child's enrolment)*, and thereby binds a child's opt-in to the guardian it already holds on file. The school matches on its own side; no roster enters myClick and myClick sends nothing.
+This is narrower than the claim this paragraph used to make, and the narrowing is honest rather than cosmetic. The unqualified version — *no email column exists on any application table* — was never exactly true, in two ways a reviewer finds in minutes:
+
+- `account.auth_ref` has been `text not null` since migration 0001, and with `auth_provider = 'email'` it holds whatever reference the client registered with, which for most accounts is their address. It is an **authentication identifier**, not contact data: unvalidated text that keys the account to its provider — on staging two of five accounts hold their own account UUID in it — and nothing reads it as a way to reach or to name anybody.
+- `organisation.billing_email` has been `text not null` since migration 0104 ([ADR-0055](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0055-organisation-commercial-entity-outside-the-encryption-boundary.md)). That is a **business address on a commercial record**, of the kind an invoice goes to; the Organisation exists outside the encryption boundary by design, precisely so the server can bill it.
+
+What changes below is neither of those. It is the first column the schema holds **as a natural person's contact address and reads as one** — a value whose stated purpose is to identify that human to another party, carrying a provenance and a date because those are what a contact record needs and an authentication key does not.
+
+**The first exception, a read: a school Click's admin may read its members' verified emails.** One enumerated `SECURITY DEFINER` read, `get_click_member_verified_emails`, returns each active member's verified account email to the **admin** of a **school** Click, alongside the children that member guards there. Its purpose is guardian binding: the school pairs its own record *(this email guards this child)* with our verified fact *(this verified-email account controls this child's enrolment)*, and thereby binds a child's opt-in to the guardian it already holds on file. The school matches on its own side; no roster enters myClick and myClick sends nothing.
 
 The exception is bounded, and the bounds are enforced server-side, fail-closed:
 
@@ -547,6 +554,21 @@ The exception is bounded, and the bounds are enforced server-side, fail-closed:
 **What this concedes, precisely.** Not "the server can now read your email" — it always could (§5.3). The concession is that **another account** — a school admin — can now see it. A disclosure between users is a different kind of thing from a disclosure to the platform, which is why the member-facing disclosure above is mandatory rather than optional. Like every revocation in this protocol, it is **forward-only**: removing an admin stops future reads; it cannot unsee what was seen.
 
 Recorded in ADR-0046. The precedent is ADR-0040, which carved the same shape for the photographer's account email in the provenance stamp: a named, disclosed, purpose-bound email exception for a legitimate accountability need.
+
+**The second exception, a stored copy: an Organisation records the address of each of its members.** `organisation_membership.contact_email` holds the account email of the person on that membership row, with a provenance marker and the date it was obtained. Its purpose is that an Organisation's administrative console can name a person rather than print a raw account UUID; an Organisation carries no display name for anyone, encrypted or otherwise, and every screen it has read as a column of identifiers without it.
+
+What it is, exactly:
+
+- **A snapshot, not a resolution.** The value is written once, at the moment the membership is created — by `create_organisation` for a founder, by `accept_organisation_invitation` for a joiner, plus a one-shot backfill of memberships predating the column. The read never joins `auth.users`, so the recorded value deliberately does **not** follow a later change to the account. It is a historical fact about one relationship, not a live lookup, and a live lookup would silently follow an address the Organisation was never given.
+- **Confirmed addresses only.** An unconfirmed address resolves to null and nothing is recorded; the member still joins and still appears in the roster. This is §5.9's existing verified-only rule applied to a write instead of a read — exclude the value, never the person.
+- **Readable only by an admin of that same Organisation**, through the enumerated `SECURITY DEFINER` read `list_organisation_members`. A plain member of the Organisation gets an empty result. `anon` and `PUBLIC` cannot execute it, and no client role can select the table.
+- **Never a delivery source.** The transactional mail path still resolves the recipient's address from `auth.users` at claim time and persists none (§5.9's read-only rule, ADR-0056). Nothing sends to this column, and no queued message can be addressed from it.
+- **Outside the encryption boundary, and only there.** No Click holds this. No group key, no ciphertext, no roster, no premises, and nothing in the recognition or publication path reads it. The Organisation was already the server-readable commercial entity of ADR-0055; this stays inside that entity.
+- **Erased when the account closes.** `close_account` clears it in every Organisation immediately, in the same transaction that stamps `closed_at`, rather than waiting for a hard-delete sweep that has never been built. Removal from an Organisation does *not* erase it: the Organisation's record of a relationship it had is the Organisation's, and it ends when the person's account ends.
+
+**What is still true, and what is now owed.** No phone number is stored anywhere. The concession is again a disclosure **between users** rather than to the platform — an Organisation's admins can see the address of their own members, and nobody else can. What this does newly incur is a **retention obligation**: a stored address needs a member-facing way to have it forgotten. That right is **owed and not yet built** — recorded as such in ADR-0057 §8 rather than quietly dropped — and until it ships the only erasure is closing the account.
+
+Recorded in [ADR-0057](https://github.com/carlheinmostert/myClick/blob/main/docs/adr/0057-organisation-records-a-members-contact-address.md), implemented by migration 0112.
 
 ## 6. Per-Click group key (the ratchet)
 
