@@ -40,6 +40,10 @@ This protocol is being designed in the open. See the commit history for how it e
      - [8.21.8 X11 implementation gates and Stream exclusion](#8218-x11-implementation-gates-and-stream-exclusion)
    - [8.22 The durable user-state store (love, hide, and dwell)](#822-the-durable-user-state-store-love-hide-and-dwell)
 9. [Revocation (key rotation; forward-immediate, forward-only)](#9-revocation-key-rotation-forward-immediate-forward-only)
+   - [9.5 Account close](#95-account-close)
+     - [9.5.1 What account close does today](#951-what-account-close-does-today)
+     - [9.5.2 What is being built (not yet running)](#952-what-is-being-built-not-yet-running)
+     - [9.5.3 The audit environment is a deliberate exception, and stays one](#953-the-audit-environment-is-a-deliberate-exception-and-stays-one)
 10. [Key escrow and recovery](#10-key-escrow-and-recovery)
 11. [Streaming relay and distribution](#11-streaming-relay-and-distribution)
     - [11.2 Per-blob content key, wrapped under the Stream epoch key](#112-per-blob-content-key-wrapped-under-the-stream-epoch-key)
@@ -1775,6 +1779,8 @@ On any member departure — removal or voluntary leave — the biometric group k
 
 Before rotation, the removed member holds version N and can decrypt everything sealed under it. After rotation, the roster is sealed under version N+1, which is wrapped only for the remaining members; the removed member holds a dead key and can decrypt nothing uploaded thereafter.
 
+**Departure here means an explicit removal or leave, and closing an account is neither.** *(Clarified 2026-08-18, alongside the [section 9.5](#95-account-close) correction.)* Rotation is driven by the membership change itself. `close_account()` changes no membership, so an account close rotates nothing and the closed account's devices keep the group-key version they already hold; whether that is the right behaviour is settled by [section 9.5](#95-account-close), not here.
+
 ```mermaid
 flowchart TB
     subgraph before["Before rotation — group key version N"]
@@ -1815,7 +1821,42 @@ The real guarantee is the key rotation in [section 9.1](#91-the-mechanism-is-key
 
 ### 9.5 Account close
 
-On account close, data is **soft-deleted for 30 days** and then hard-deleted. The grace window allows recovery from an accidental or coerced closure; after it, the data is gone. A right-of-access JSON export of an account's own data is available on request, so a user can take their data with them.
+**CORRECTED 2026-08-18.** The single clause this section carried until today asserted a hard delete that **does not exist**. It is replaced below by a statement of what runs today and a separately marked statement of what is being built. The superseded sentence is kept at the foot of this section rather than deleted, because the promise it makes is the promise we intend to keep — the fault proved out on 2026-08-18 is in the implementation, not in the undertaking — and because a reader of an earlier draft is entitled to see exactly what was claimed. **A reader must not merge the two subsections below.** [9.5.1](#951-what-account-close-does-today) is the running system and is what any honest product claim may rest on; [9.5.2](#952-what-is-being-built-not-yet-running) is an intention on a branch and may be relied on for nothing until it is verified running.
+
+#### 9.5.1 What account close does today
+
+`close_account()` **marks the account and clears one field; beyond that field it deletes nothing.** It sets `account.closed_at` on the caller's own row, idempotently; and, under a later app-domain decision recorded in the myClick working repo (`docs/adr/0057-organisation-records-a-members-contact-address.md` §6.2/§6.3), it also clears the account holder's recorded contact address from every Organisation they are still a member of, **in the same transaction, immediately** — precisely because the hard delete it would otherwise have waited for does not exist. That one clearing is the only erasure in the whole path. What follows is exactly this, and no more:
+
+- **The mark is read as a liveness guard, and that is the whole of what "soft" buys.** A closed account is refused where a live principal is required — it cannot be proposed as a co-guardian, cannot be assigned a licence, and is rejected by the admission and key-distribution paths that check the column. The mark withdraws the account from being *used*; it withdraws nothing from being *held*.
+- **Nothing else is removed, then or later.** There is no scheduled job, no cron entry, no worker and no trigger anywhere that reads `closed_at` and deletes; the deployed staging environment runs five `pg_cron` jobs and none of them purges accounts. The thirty-day window has no expiry mechanism behind it, so no hard delete follows it, and **anything left on a soft-closed row is left there permanently**. This was already recorded in the myClick working repo on 2026-08-08 (ADR-0057 §6.3) while this section still claimed the opposite; the two now agree.
+- **A close ends no membership, and therefore rotates no group key.** The rotation of [section 9.1](#91-the-mechanism-is-key-rotation) is driven by an explicit removal or leave. A close performs neither, so a closed account's memberships stand, its devices keep the group-key version they already hold, and the Clicks it belonged to rotate nothing.
+- **Deleting the underlying auth record does not reach the biometric data.** `public.account.id` is a foreign key to `auth.users` with `ON DELETE CASCADE`, so deleting the auth user does delete the account row and every row keyed on the account — guardianship, membership, licence, opt-in and the rest. It does **not** reach `public.person` or `public.embedding`. `person` carries **no `account_id` column and no foreign key to `account`**; an `embedding` hangs off `person`, not off an account. The only thing joining a human to the people they enrolled is the `guardianship` row — and cascading that row away **severs the link while leaving the person, their encrypted face templates, their opt-ins and their Click memberships standing, now guarded by nobody**.
+
+At its plainest, and this is the sentence a product claim must be measured against: **closing an account removes nothing but that one contact address, and deleting the auth record behind it still leaves the enrolled people and their encrypted face templates on the server.** Proved by execution against a from-zero database build on 2026-08-18 — delete the account and the person, the embedding, the opt-in and the Click all remain; delete the auth user as well and they still remain. The deployed environments hold such embeddings today: 66 on staging, 49 in production.
+
+Two further clauses of the superseded text deserve separating, because one is true and one is not. **The right-of-access export is real:** `export_my_data()` returns a JSON export of the account's own data, so a user can take their data with them. **The grace window's stated purpose is not implemented:** the old clause justified thirty days as allowing *"recovery from an accidental or coerced closure"*, and no re-open path exists — no RPC clears `closed_at`, and none restores a closed account. The window today is a number with neither an expiry behind it nor a recovery in front of it. Providing that reversal, or dropping the claim, belongs with the purge job in [9.5.2](#952-what-is-being-built-not-yet-running).
+
+#### 9.5.2 What is being built (not yet running)
+
+A purge job is in development on a feature branch as of 2026-08-18. **Everything in this subsection is in the future tense deliberately, and none of it is running.** It is recorded here because the spec precedes the code, not because it describes behaviour anyone can rely on; nothing below may be quoted as a guarantee until it is verified running, at which point it moves into [9.5.1](#951-what-account-close-does-today) and this subsection is retired. When it lands it will:
+
+1. **Delete the auth record**, letting the existing `ON DELETE CASCADE` carry the `public.account` row and every account-keyed row with it — closing the gap where a close left the principal in place indefinitely.
+2. **Delete a `Person` when their *last* guardianship goes, not their first.** A co-guarded child survives one guardian leaving, and is deleted only when no guardianship remains — at which point their embeddings, opt-ins and content-key wraps go with them through the cascades those tables already declare. This is the rule that makes an account purge safe in a two-parent family, and it is the reason the job cannot simply be a cascade from `account`.
+3. **Crypto-shred the departing account's own published photos**, in the sense [section 11.5](#115-crypto-shred-at-the-ttl-window) already fixes for that word: the wrapped content key and the stored object are both deleted, so the ciphertext becomes unopenable rather than merely unserved.
+
+Two limits will still hold after it lands, and neither is closed by it. Erasure remains **forward-only** in exactly the sense of [section 9.3](#93-forward-only-stated-plainly) — a photo already developed into another member's Photos is beyond any purge's reach. And the audit exception below is not a symptom of the current gap: it survives the purge job by design.
+
+#### 9.5.3 The audit environment is a deliberate exception, and stays one
+
+Erasure clears the **transactional** environment. The **audit** environment is deliberately **out of scope** and is retained, for one bounded purpose: tracing what happened is how the product protects children and answers for itself. Two things make that defensible and both are load-bearing — the purpose is bounded, and an audit row is **never** used to populate a contact list or to reach anybody.
+
+**No retention period is set for those rows, and none is invented here.** They are held indefinitely until a period is decided; deciding one is owed work, recorded as such and not quietly discharged by this correction. It follows that no surface may promise that anything is forgotten *everywhere*, because it is not — before or after the purge job lands.
+
+This carve-out is recorded in the myClick working repo at `docs/adr/0057-organisation-records-a-members-contact-address.md` §8 and `docs/adr/0059-removing-an-organisation-member-deletes-the-record.md`.
+
+*Superseded 2026-08-18; the original clause is kept, with the false half struck rather than removed, because it records the promise [9.5.2](#952-what-is-being-built-not-yet-running) is being built to honour:*
+
+> On account close, data is **soft-deleted for 30 days** ~~and then hard-deleted~~. The grace window allows recovery from an accidental or coerced closure; ~~after it, the data is gone~~. A right-of-access JSON export of an account's own data is available on request, so a user can take their data with them.
 
 
 
@@ -2779,6 +2820,7 @@ These are the things we have deliberately deferred or not yet pinned down. We li
 - **Stream whole-file video is provisionally open under founder-pinned §11.2.1 caps (2026-07-11).** Raising any cap, admitting Live aggregates, or enabling notification-extension video fetch still requires the physical iPhone 12/A14 measurement report (and, for Live/NSE, their separate constructions). Per-frame video observation sidecars remain a later tightening; v1 video uses whole-clip subject regions only.
 - **Rich still notification thumbnails are enabled and bounded by construction; the lowest-device measurement report is still owed.** The extension decodes at a 360-pixel maximum edge through ImageIO, so peak working set is independent of the admitted 16,384-pixel still bound (§12.2.2). The release-build physical-device extension harness that would pin real extension-specific memory/decode/time constants has **not** been run, and until its constants and report hash pass protocol/security review the bound may not be raised and no further decode may be added to that path. Moving-media extension fetch remains disabled — structurally, by linking a still-only crypto surface into the extension — even though app-process video and Live are open, absent its own fixed-size authenticated-preview design and measurement.
 - **The notification open skips the observation sidecar, and the notification cache key carries no world.** Both are recorded deviations with bounded consequences (§12.2.1, §12.2.3), not open design questions: the sidecar has no pixel-producing role and was refused as an APNs field because its length is a near-exact face counter, and the missing `world_id` is a purely additive fix to an app-written cache. They are listed here so an auditor finds them without reading §12 end to end.
+- **Account close deletes nothing today, and the audit environment is a standing exception to erasure.** Recorded on 2026-08-18 as a stated implementation gap, not an open design question: `close_account()` stamps a timestamp, no job hard-deletes after it, and severing an account never reaches `public.person` or `public.embedding` — the purge job that closes it is on a branch and is written in the future tense throughout [section 9.5](#95-account-close). Separately and permanently, audit rows are retained for child-safety traceability and **no retention period for them has been decided**; that decision is genuinely owed. Listed here so an auditor finds both without reading §9 end to end.
 - **STOP-only withdrawal is the normative provisional v1 decision.** No successor RPC/schema/state exists. Successor re-publication remains disabled unless and until a cryptographically verifiable monotone re-obscuring construction is specified, independently reviewed, and introduced through a new wire/RPC version; a product decision alone cannot enable it under this text.
 
 **Deferred to v2**
